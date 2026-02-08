@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "deep-report"
+version = "0.1.0"
+description = "Multi-agent research report generator powered by Claude"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "rich>=13.0.0",
+    "requests>=2.28.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+deep-report = "deep_report.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/deep-report"
+Repository = "https://github.com/yourusername/deep-report"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deep_report"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

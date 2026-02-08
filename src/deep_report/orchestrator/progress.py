@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Progress tracking for deep-report orchestrator.
+
+Writes progress updates as JSON-lines for structured parsing.
+Also supports legacy .log format for backwards compatibility.
+"""
+
+import json
+import time
+from pathlib import Path
+from datetime import datetime
+from typing import Optional
+
+
+class ProgressWriter:
+    """Writes progress updates as JSON-lines."""
+
+    def __init__(self, report_dir: Path):
+        self.report_dir = Path(report_dir)
+        self.progress_file = self.report_dir / "state" / "progress.jsonl"
+        self.legacy_file = self.report_dir / "state" / "progress.log"
+        self.start_time = time.time()
+        self._ensure_dir()
+
+    def _ensure_dir(self):
+        self.progress_file.parent.mkdir(parents=True, exist_ok=True)
+
+    def _elapsed(self) -> str:
+        elapsed = time.time() - self.start_time
+        mins = int(elapsed // 60)
+        secs = int(elapsed % 60)
+        return f"{mins:02d}:{secs:02d}"
+
+    def _elapsed_secs(self) -> float:
+        return time.time() - self.start_time
+
+    def _write_event(self, event_type: str, data: dict):
+        """Write a JSON-lines event."""
+        event = {
+            "timestamp": datetime.now().isoformat(),
+            "elapsed_secs": round(self._elapsed_secs(), 2),
+            "type": event_type,
+            **data
+        }
+        try:
+            with open(self.progress_file, "a") as f:
+                f.write(json.dumps(event) + "\n")
+        except OSError as e:
+            print(f"Warning: Could not write progress: {e}")
+
+    def _write_legacy(self, line: str):
+        """Write to legacy log format for backwards compatibility."""
+        try:
+            with open(self.legacy_file, "a") as f:
+                f.write(f"[{self._elapsed()}] {line}\n")
+        except OSError:
+            pass
+
+    def update(self, phase: int, step: str, detail: str = ""):
+        """Write a progress update."""
+        self._write_event("update", {
+            "phase": phase,
+            "step": step,
+            "detail": detail
+        })
+        # Legacy format
+        line = f"Phase {phase} | {step}"
+        if detail:
+            line += f" | {detail}"
+        self._write_legacy(line)
+
+    def phase_start(self, phase: int, name: str):
+        """Mark the start of a phase."""
+        self._write_event("phase_start", {
+            "phase": phase,
+            "name": name
+        })
+        self._write_legacy(f"{'='*60}")
+        self._write_legacy(f"Phase {phase} | STARTING: {name}")
+
+    def phase_complete(self, phase: int, name: str):
+        """Mark the completion of a phase."""
+        self._write_event("phase_complete", {
+            "phase": phase,
+            "name": name
+        })
+        self._write_legacy(f"Phase {phase} | COMPLETE: {name}")
+        self._write_legacy(f"{'='*60}")
+
+    def agent_start(self, agent_id: str, total: int, current: int):
+        """Mark an agent starting."""
+        self._write_event("agent_start", {
+            "agent_id": agent_id,
+            "total": total,
+            "current": current
+        })
+        self._write_legacy(f"Phase 3 | Agent [{current}/{total}] | {agent_id} starting...")
+
+    def agent_complete(self, agent_id: str, success: bool, total: int, done: int,
+                       duration: Optional[float] = None, retries: int = 0):
+        """Mark an agent completion."""
+        self._write_event("agent_complete", {
+            "agent_id": agent_id,
+            "success": success,
+            "total": total,
+            "done": done,
+            "duration_secs": round(duration, 2) if duration else None,
+            "retries": retries
+        })
+        # Legacy format
+        status = "✓" if success else "✗"
+        detail = f"{agent_id} {status}"
+        if duration:
+            detail += f" ({duration:.0f}s)"
+        if retries > 0:
+            detail += f" [{retries} retries]"
+        self._write_legacy(f"Phase 3 | Agent [{done}/{total}] | {detail}")
+
+    def decision(self, iteration: int, sufficient: bool, reasoning: str):
+        """Log a decision agent result."""
+        self._write_event("decision", {
+            "iteration": iteration,
+            "sufficient": sufficient,
+            "reasoning": reasoning[:200]
+        })
+        status = "SUFFICIENT" if sufficient else "NEEDS MORE"
+        self._write_legacy(f"Phase 3 | Decision (iter {iteration}) | {status}: {reasoning[:100]}")
+
+    def error(self, phase: int, message: str):
+        """Log an error."""
+        self._write_event("error", {
+            "phase": phase,
+            "message": message
+        })
+        self._write_legacy(f"Phase {phase} | ERROR | {message}")
+
+    def intervention_needed(self, issue: str):
+        """Log that user intervention is needed."""
+        self._write_event("intervention_needed", {
+            "issue": issue
+        })
+        self._write_legacy(f"{'!'*60}")
+        self._write_legacy(f"Phase 0 | INTERVENTION NEEDED | {issue}")
+        self._write_legacy(f"{'!'*60}")
+
+    def approval_waiting(self, gate_id: str):
+        """Log that we're waiting for approval."""
+        self._write_event("approval_waiting", {
+            "gate_id": gate_id
+        })
+        self._write_legacy(f"Phase 0 | WAITING FOR APPROVAL | {gate_id}")
+
+    def approval_received(self, gate_id: str, approved: bool):
+        """Log approval result."""
+        self._write_event("approval_received", {
+            "gate_id": gate_id,
+            "approved": approved
+        })
+        status = "APPROVED" if approved else "REJECTED"
+        self._write_legacy(f"Phase 0 | APPROVAL {status} | {gate_id}")
+
+    def summary(self, stats: dict):
+        """Write final summary stats."""
+        self._write_event("summary", stats)
+        self._write_legacy(f"{'='*60}")
+        self._write_legacy("Phase 5 | SUMMARY")
+        for key, value in stats.items():
+            self._write_legacy(f"Phase 5 |   {key} | {value}")
+        self._write_legacy(f"{'='*60}")
