@@ -22,7 +22,7 @@ deep-report --version || pip install deep-report
 
 If pip install fails, install from GitHub:
 ```bash
-pip install git+https://github.com/yourusername/deep-report
+pip install git+https://github.com/lampadare/deep-report
 ```
 
 ## What This Skill Does
@@ -147,7 +147,7 @@ deep-report --resume ./topic_20260207_1430
 
 ## Troubleshooting
 
-**Not installed:** `pip install deep-report` or `pip install git+https://github.com/yourusername/deep-report`
+**Not installed:** `pip install deep-report` or `pip install git+https://github.com/lampadare/deep-report`
 
 **Claude CLI not found:** Install Claude Code from https://claude.ai/download
 

@@ -21,8 +21,8 @@ dev = ["pytest", "ruff"]
 deep-report = "deep_report.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/deep-report"
-Repository = "https://github.com/yourusername/deep-report"
+Homepage = "https://github.com/lampadare/deep-report"
+Repository = "https://github.com/lampadare/deep-report"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/deep_report"]

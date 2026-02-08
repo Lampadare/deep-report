@@ -16,7 +16,7 @@ Deep Report orchestrates a swarm of Claude agents to research a topic in paralle
 pip install deep-report
 
 # From GitHub
-pip install git+https://github.com/yourusername/deep-report
+pip install git+https://github.com/lampadare/deep-report
 
 # With pipx (isolated environment, recommended)
 pipx install deep-report
@@ -114,7 +114,7 @@ Reports are created in the current directory:
 ## Development
 
 ```bash
-git clone https://github.com/yourusername/deep-report
+git clone https://github.com/lampadare/deep-report
 cd deep-report
 pip install -e ".[dev]"
 ```
