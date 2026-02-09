@@ -25,6 +25,7 @@ Options:
     --list, -l          List unfinished reports and resume one
     --delete, -d        Delete a report from the registry
     --update            Update to latest version from GitHub
+    --setup-skill       Install Claude Code skill for /deep-report command
 """
 
 import argparse
@@ -517,12 +518,18 @@ Examples:
                         help="Show detailed agent activity (press 'v' during execution to toggle)")
     parser.add_argument("--update", action="store_true",
                         help="Update deep-report to latest version from GitHub")
+    parser.add_argument("--setup-skill", action="store_true",
+                        help="Install Claude Code skill for /deep-report command")
 
     args = parser.parse_args()
 
     # Handle --update flag first
     if args.update:
         return update_cli()
+
+    # Handle --setup-skill flag
+    if args.setup_skill:
+        return setup_skill()
 
     # Create context
     ctx = OrchestratorContext(interactive=args.interactive, verbose=args.verbose)
@@ -749,6 +756,53 @@ def update_cli() -> int:
         return 1
     except Exception as e:
         ui.error(f"Update failed: {e}")
+        return 1
+
+
+def setup_skill() -> int:
+    """Install Claude Code skill by symlinking to ~/.claude/skills/."""
+    import deep_report
+
+    # Find the skill directory in the installed package
+    package_dir = Path(deep_report.__path__[0])
+    skill_source = package_dir / "skill"
+
+    if not skill_source.exists():
+        ui.error(f"Skill not found at {skill_source}")
+        return 1
+
+    # Target: ~/.claude/skills/deep-report
+    claude_skills_dir = Path.home() / ".claude" / "skills"
+    skill_target = claude_skills_dir / "deep-report"
+
+    # Create skills directory if needed
+    claude_skills_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if already exists
+    if skill_target.exists() or skill_target.is_symlink():
+        if skill_target.is_symlink():
+            current = skill_target.resolve()
+            if current == skill_source.resolve():
+                ui.success("Skill already installed")
+                ui.info(f"  {skill_target} → {skill_source}")
+                return 0
+            else:
+                # Different symlink, remove and recreate
+                skill_target.unlink()
+        else:
+            ui.warning(f"Removing existing {skill_target}")
+            import shutil
+            shutil.rmtree(skill_target)
+
+    # Create symlink
+    try:
+        skill_target.symlink_to(skill_source)
+        ui.success("Claude Code skill installed")
+        ui.info(f"  {skill_target} → {skill_source}")
+        ui.info("Use /deep-report in Claude Code to invoke")
+        return 0
+    except Exception as e:
+        ui.error(f"Failed to create symlink: {e}")
         return 1
 
 
