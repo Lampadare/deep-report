@@ -22,6 +22,9 @@ Options:
     --expertise LEVEL   beginner, intermediate (default), expert
     --report-type TYPE  state-of-the-art, tutorial, comparison, survey
     --resume PATH       Resume from existing report directory
+    --list, -l          List unfinished reports and resume one
+    --delete, -d        Delete a report from the registry
+    --update            Update to latest version from GitHub
 """
 
 import argparse
@@ -512,8 +515,14 @@ Examples:
     parser.add_argument("--cwd", help="Original working directory (set by CLI wrapper)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Show detailed agent activity (press 'v' during execution to toggle)")
+    parser.add_argument("--update", action="store_true",
+                        help="Update deep-report to latest version from GitHub")
 
     args = parser.parse_args()
+
+    # Handle --update flag first
+    if args.update:
+        return update_cli()
 
     # Create context
     ctx = OrchestratorContext(interactive=args.interactive, verbose=args.verbose)
@@ -709,6 +718,38 @@ def delete_report() -> int:
             ui.warning("Report not found in registry")
 
     return 0
+
+
+def update_cli() -> int:
+    """Update deep-report to latest version from GitHub."""
+    import subprocess
+
+    ui.info("Updating deep-report from GitHub...")
+
+    try:
+        result = subprocess.run(
+            ["pip", "install", "--upgrade", "git+https://github.com/lampadare/deep-report.git"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        if result.returncode == 0:
+            ui.success("Updated successfully")
+            # Show new version if we can parse it
+            if "Successfully installed" in result.stdout:
+                ui.info(result.stdout.split("Successfully installed")[-1].strip())
+            return 0
+        else:
+            ui.error(f"Update failed: {result.stderr}")
+            return 1
+
+    except subprocess.TimeoutExpired:
+        ui.error("Update timed out")
+        return 1
+    except Exception as e:
+        ui.error(f"Update failed: {e}")
+        return 1
 
 
 def resume_report(report_dir: Path, ctx: OrchestratorContext) -> int:
