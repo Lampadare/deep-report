@@ -26,6 +26,7 @@ Options:
     --delete, -d        Delete a report from the registry
     --update            Update to latest version from GitHub
     --setup-skill       Install Claude Code skill for /deep-report command
+    --intro             Show onboarding guide and example usage
 """
 
 import argparse
@@ -520,6 +521,8 @@ Examples:
                         help="Update deep-report to latest version from GitHub")
     parser.add_argument("--setup-skill", action="store_true",
                         help="Install Claude Code skill for /deep-report command")
+    parser.add_argument("--intro", action="store_true",
+                        help="Show onboarding guide and example usage")
 
     args = parser.parse_args()
 
@@ -530,6 +533,10 @@ Examples:
     # Handle --setup-skill flag
     if args.setup_skill:
         return setup_skill()
+
+    # Handle --intro flag
+    if args.intro:
+        return show_intro()
 
     # Create context
     ctx = OrchestratorContext(interactive=args.interactive, verbose=args.verbose)
@@ -804,6 +811,150 @@ def setup_skill() -> int:
     except Exception as e:
         ui.error(f"Failed to create symlink: {e}")
         return 1
+
+
+def show_intro() -> int:
+    """Show onboarding guide with flow explanation and examples."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.markdown import Markdown
+
+    console = Console()
+
+    intro = """
+# Welcome to Deep Report
+
+Deep Report generates **comprehensive research reports** by spawning multiple
+Claude agents in parallel, each investigating a different aspect of your topic.
+
+---
+
+## Getting Started
+
+The simplest way to start:
+
+    deep-report "your research topic"
+
+That's it! An **interactive interview** will walk you through all the options:
+- How many research agents to use
+- Which model (Sonnet or Opus)
+- Target expertise level
+- Report type
+- Whether to add seed references
+
+**All flags are optional** - the interview covers everything. Use `--quick` only
+if you want to skip the interview and use sensible defaults.
+
+---
+
+## How It Works (5 Phases)
+
+### Phase 1: Setup
+- Creates report directory structure
+- Processes any seed references (PDFs, URLs, Excel files) you provide
+- Writes a scope document defining research boundaries
+
+### Phase 2: Planning
+- Decomposes your topic into 10-30 research threads
+- Each thread gets a specific angle to investigate
+- Shows estimated cost before proceeding
+
+### Phase 3: Research ← *This is where the magic happens*
+- Spawns parallel Claude agents (each with web search)
+- Agents write 3,000-6,000 word research files
+- A decision agent evaluates coverage and may request follow-ups
+- Iterates until research is deemed sufficient
+
+### Phase 4: Synthesis
+- Synthesizes all research into a cohesive report
+- Writes executive summary, sections, conclusion
+- Compiles references and optionally generates audio version
+
+### Phase 5: Cleanup
+- Writes final summary with metrics
+- Report is ready at `<output-dir>/report.md`
+
+---
+
+## Where You Provide Input
+
+| When | What |
+|------|------|
+| **Start** | Topic (required) |
+| **Interview** | The interview guides you through all options |
+| **Pre-research** | Approve plan and cost estimate (with `--interactive`) |
+| **Iterations** | Approve follow-up research rounds (with `--interactive`) |
+
+---
+
+## Examples
+
+```bash
+# Interactive mode (recommended for first time)
+deep-report "quantum computing advances in 2025"
+
+# Skip interview, use defaults
+deep-report "CRISPR gene therapy" --quick
+
+# Provide seed references (the interview will also ask about this)
+deep-report "neural interfaces" --refs ./papers/
+
+# Resume an interrupted report
+deep-report --list
+```
+
+---
+
+## Output Structure
+
+```
+your-topic_20260209_1430/
+├── report.md          ← Final synthesized report (15-30k words)
+├── refs.md            ← Compiled references
+├── SUMMARY.md         ← Metrics and stats
+├── full/agents/       ← Raw research from each agent
+├── summaries/agents/  ← Condensed summaries
+└── state/             ← Checkpoints for resume
+```
+
+---
+
+## Tips
+
+- **Seed references** dramatically improve quality - the interview will ask
+- Reports auto-save and can be resumed with `--list`
+- Press **'v'** during execution to toggle verbose mode
+- Typical report takes 15-45 minutes depending on settings
+
+---
+
+Ready? Just run:
+
+    deep-report "your topic here"
+
+"""
+
+    console.print(Panel(Markdown(intro), title="[bold cyan]Deep Report Onboarding[/]", border_style="cyan"))
+
+    # Offer to run example
+    if QUESTIONARY_AVAILABLE:
+        result = questionary.confirm(
+            "Would you like to run a quick example report now?",
+            default=False,
+            style=custom_style
+        ).ask()
+
+        if result:
+            console.print("\n[dim]Starting: deep-report \"Brief history of neural networks\" --quick --agents 3[/]\n")
+            import subprocess
+            subprocess.run([
+                "deep-report",
+                "Brief history of neural networks",
+                "--quick",
+                "--agents", "3"
+            ])
+
+    return 0
 
 
 def resume_report(report_dir: Path, ctx: OrchestratorContext) -> int:
