@@ -2,6 +2,7 @@
 """Phase 3: Research - Iterative research with decision agent evaluation."""
 
 import json
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -10,13 +11,13 @@ from ..utils import (
     spawn_agent,
     spawn_agents_parallel,
     spawn_decision_agent,
-    spawn_summarizer,
     AgentResult,
     AGENT_TOOLS,
     DEFAULT_TIMEOUT,
 )
 from ..approval import ApprovalGate
 from ..progress import ProgressWriter
+from ..ui import ui
 
 
 def run_research(
@@ -53,7 +54,7 @@ def run_research(
     # APPROVAL GATE: Before first research run
     if approval and state.research_iteration == 0:
         if not approval.pre_research_gate(state):
-            print("Research cancelled by user")
+            ui.warning("Research cancelled by user")
             return False
 
     while iteration < max_iterations:
@@ -61,7 +62,7 @@ def run_research(
         state.research_iteration = iteration
         state.checkpoint(f"research_iteration_{iteration}")
 
-        print(f"\n=== Research Iteration {iteration}/{max_iterations} ===")
+        ui.info(f"Research Iteration {iteration}/{max_iterations}")
         if progress:
             progress.update(3, f"Iteration {iteration}/{max_iterations}", "starting")
 
@@ -74,11 +75,11 @@ def run_research(
             threads_to_run = state.get_pending_followups()
 
         if not threads_to_run:
-            print("No threads to run, skipping iteration")
+            ui.info("No threads to run, skipping iteration")
             break
 
         # Run research agents in parallel
-        print(f"Spawning {len(threads_to_run)} research agents...")
+        ui.step(f"Spawning {len(threads_to_run)} research agents")
         if progress:
             progress.update(3, f"Spawning agents", f"{len(threads_to_run)} agents")
 
@@ -101,7 +102,7 @@ def run_research(
                 else:
                     state.failed_threads.append(thread_id)
                     state.update_thread(thread_id, status="failed")
-                print(f"Thread {thread_id} failed: {result.error}")
+                ui.warning(f"Thread {thread_id} failed: {result.error[:80]}")
                 if progress:
                     progress.error(3, f"Thread {thread_id}: {result.error[:100]}")
 
@@ -109,7 +110,7 @@ def run_research(
         state.checkpoint(f"research_batch_{iteration}_complete")
 
         # Summarize all new outputs
-        print("Summarizing research outputs...")
+        ui.step("Summarizing research outputs")
         if progress:
             progress.update(3, "Summarizing", f"{len(results)} outputs")
         _summarize_outputs(state, results)
@@ -117,20 +118,25 @@ def run_research(
 
         # Decision agent: should we go deeper?
         if iteration < max_iterations:
-            print("Evaluating research coverage...")
+            ui.step("Evaluating research coverage")
             if progress:
                 progress.update(3, "Decision agent", "evaluating coverage")
 
             summaries = _gather_all_summaries(report_dir)
+            # Use brief if available (detailed research instructions), otherwise topic
+            decision_topic = state.brief or state.topic
             decision = spawn_decision_agent(
                 summaries=summaries,
-                topic=state.topic,
+                topic=decision_topic,
                 iteration=iteration,
                 max_iterations=max_iterations,
             )
 
-            print(f"Decision: sufficient={decision.get('sufficient', True)}")
-            print(f"Reasoning: {decision.get('reasoning', 'N/A')}")
+            ui.decision(
+                iteration,
+                decision.get('sufficient', True),
+                decision.get('reasoning', 'N/A')
+            )
 
             if progress:
                 progress.decision(
@@ -140,13 +146,13 @@ def run_research(
                 )
 
             if decision.get("sufficient", True):
-                print("Research deemed sufficient, ending iterations")
+                ui.success("Research deemed sufficient")
                 break
 
             # APPROVAL GATE: Before each follow-up iteration
             if approval:
                 if not approval.iteration_gate(state, decision, iteration):
-                    print("User stopped iterations, proceeding to synthesis")
+                    ui.info("User stopped iterations, proceeding to synthesis")
                     break
 
             # Create follow-up threads from decision
@@ -157,7 +163,7 @@ def run_research(
 
     completed = len(state.completed_threads)
     failed = len(state.failed_threads)
-    print(f"\nPhase 3 (Research) complete: {completed} succeeded, {failed} failed")
+    ui.info(f"{completed} threads succeeded, {failed} failed")
 
     if progress:
         progress.update(3, "Complete", f"{completed} succeeded, {failed} failed")
@@ -209,8 +215,11 @@ def _run_research_batch(
 
         output_file = report_dir / "full" / "agents" / f"{thread_id}.md"
 
+        # Use brief if available (detailed research instructions), otherwise topic
+        research_instructions = state.brief or state.topic
+
         prompt = _build_research_prompt(
-            topic=state.topic,
+            topic=research_instructions,
             title=title,
             objective=objective,
             questions=questions,
@@ -232,19 +241,27 @@ def _run_research_batch(
             "allowed_tools": AGENT_TOOLS["research"],
         })
 
-    # Progress callback
+    # Progress callback with thread-safe counter
     completed = [0]
     total = len(tasks)
+    completed_lock = threading.Lock()
 
     def on_complete(task_id: str, result: AgentResult):
-        completed[0] += 1
+        with completed_lock:
+            completed[0] += 1
+            current = completed[0]
         status = "✓" if result.success else "✗"
         retries = f" [{result.retries} retries]" if result.retries > 0 else ""
-        print(f"  [{completed[0]}/{total}] {task_id}: {status}{retries}")
+        ui.verbose(f"[{current}/{total}] {task_id}: {status}{retries}")
+
+        # Verbose output: show duration and error details
+        ui.verbose(f"  Duration: {result.duration_secs:.1f}s")
+        if not result.success:
+            ui.verbose(f"  Error: {result.error[:200]}")
 
         if progress:
             progress.agent_complete(
-                task_id, result.success, total, completed[0],
+                task_id, result.success, total, current,
                 result.duration_secs, result.retries
             )
 
@@ -269,7 +286,7 @@ def _build_research_prompt(
 
     return f"""You are a research agent. Investigate this aspect of the larger topic.
 
-## Main Topic
+## Main Topic / Research Brief
 {topic}
 
 ## Your Assignment
@@ -324,18 +341,19 @@ Use WebSearch and WebFetch to find authoritative sources. Prioritize:
 - Expert analyses from reputable institutions
 - Recent data (prefer last 3-5 years unless foundational)
 
-Write ONLY to the specified output file. Do not write to any other location.
+CRITICAL: You MUST call Write tool with file_path="{output_file}" to save your research.
 """
 
 
 def _summarize_outputs(state: State, results: dict[str, AgentResult]):
-    """Summarize all successful research outputs.
+    """Summarize all successful research outputs in parallel.
 
     Reads content directly and passes to summarizer agents to avoid Read tool failures.
     """
     report_dir = Path(state.report_dir)
     summaries_dir = report_dir / "summaries" / "agents"
 
+    tasks = []
     for thread_id, result in results.items():
         if not result.success:
             continue
@@ -348,21 +366,52 @@ def _summarize_outputs(state: State, results: dict[str, AgentResult]):
         try:
             content = output_file.read_text()
         except Exception as e:
-            print(f"Failed to read {output_file}: {e}")
+            ui.warning(f"Failed to read {output_file}: {e}")
             continue
 
         summary_file = summaries_dir / f"{thread_id}_summary.md"
 
-        summarize_result = spawn_summarizer(
-            input_file=output_file,
-            output_file=summary_file,
-            topic=state.topic,
-            model="haiku",
-            content=content  # Pass content directly
-        )
+        # Use brief if available (detailed research instructions), otherwise topic
+        summary_topic = state.brief or state.topic
 
-        if not summarize_result.success:
-            print(f"Failed to summarize {thread_id}: {summarize_result.error}")
+        prompt = f"""TASK: Summarize research output.
+
+OUTPUT FILE: {summary_file}
+
+<content>
+{content}
+</content>
+
+Format (under 500 words):
+- 5-10 bullet points of key findings
+- Use [FINDING-HIGH/MEDIUM/LOW] confidence prefixes
+- Include source citations
+- Preserve quantitative data and specific claims
+
+CRITICAL: You MUST call Write tool with file_path="{summary_file}" to save your summary.
+"""
+
+        tasks.append({
+            "id": thread_id,
+            "prompt": prompt,
+            "model": "sonnet",
+            "output_file": str(summary_file),
+            "timeout_secs": 540,
+            "allowed_tools": ["Write"],
+        })
+
+    if not tasks:
+        return
+
+    def on_complete(task_id: str, result):
+        status = "✓" if result.success else "✗"
+        ui.verbose(f"Summary {task_id}: {status}")
+
+    results = spawn_agents_parallel(tasks, max_workers=10, on_complete=on_complete)
+
+    failed = [tid for tid, r in results.items() if not r.success]
+    if failed:
+        ui.warning(f"Failed to summarize: {failed}")
 
 
 def _gather_all_summaries(report_dir: Path) -> list[str]:
@@ -430,7 +479,7 @@ def _create_followups(state: State, decision: dict, iteration: int):
         state.add_followup(fu)
 
     if followups:
-        print(f"Created {len(followups)} follow-up threads for iteration {iteration + 1}")
+        ui.info(f"Created {len(followups)} follow-up threads for iteration {iteration + 1}")
 
 
 def _mark_followup_complete(state: State, followup_id: str, result: AgentResult):

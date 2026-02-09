@@ -7,6 +7,7 @@ from datetime import datetime
 
 from ..state import State
 from ..utils import RoleEnforcer
+from ..ui import ui
 
 
 def run_cleanup(state: State) -> bool:
@@ -193,24 +194,18 @@ def _finalize_manifest(state: State, metrics: dict):
 def _print_summary(state: State, metrics: dict, report_dir: Path):
     """Print final summary to console."""
 
-    print("\n" + "=" * 60)
-    print(f"REPORT COMPLETE: {state.topic}")
-    print("=" * 60)
-    print(f"\nLocation: {report_dir}")
-    print(f"\nReport: {metrics['report_word_count']:,} words")
-    print(f"Raw research: {metrics['raw_research_words']:,} words")
-    print(f"Agents: {metrics['agents_completed']}/{metrics['agents_planned']} completed")
-    print(f"Iterations: {metrics['research_iterations']}")
+    stats = {
+        "Report": f"{metrics['report_word_count']:,} words",
+        "Raw research": f"{metrics['raw_research_words']:,} words",
+        "Agents": f"{metrics['agents_completed']}/{metrics['agents_planned']} completed",
+        "Iterations": metrics['research_iterations'],
+        "Estimated cost": f"${metrics['estimated_cost']:.2f}",
+    }
 
     if metrics["audio_generated"]:
-        print(f"Audio: {metrics.get('audio_word_count', 0):,} words")
+        stats["Audio"] = f"{metrics.get('audio_word_count', 0):,} words"
 
     if metrics["papers_downloaded"] > 0:
-        print(f"Papers: {metrics['papers_downloaded']} PDFs downloaded")
+        stats["Papers"] = f"{metrics['papers_downloaded']} PDFs"
 
-    print(f"\nEstimated cost: ${metrics['estimated_cost']:.2f}")
-    print("\nFiles:")
-    print(f"  {report_dir}/report.md")
-    print(f"  {report_dir}/refs.md")
-    print(f"  {report_dir}/SUMMARY.md")
-    print("=" * 60 + "\n")
+    ui.final_summary(str(report_dir), stats)

@@ -6,22 +6,42 @@ import re
 import sys
 import json
 import subprocess
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
 from ..state import State
-from ..utils import spawn_agent, AgentResult, AGENT_TOOLS
+from ..utils import spawn_agent, AGENT_TOOLS
+from ..ui import ui
 
 
 def _sanitize_topic(topic: str) -> str:
     """Sanitize topic to prevent path traversal and shell injection."""
+    import urllib.parse
+
+    # Decode URL-encoded characters first (handles %2e, %2f, etc.)
+    try:
+        topic = urllib.parse.unquote(topic)
+    except Exception:
+        pass
+
+    # Remove null bytes
+    topic = topic.replace('\x00', '')
+
+    # Normalize unicode to catch homograph attacks
+    import unicodedata
+    topic = unicodedata.normalize('NFKC', topic)
+
     # Remove path traversal attempts
     topic = topic.replace("..", "").replace("/", " ").replace("\\", " ")
+
     # Remove shell metacharacters
-    topic = re.sub(r'[;&|`$]', '', topic)
+    topic = re.sub(r'[;&|`$<>\'\"()]', '', topic)
+
     # Collapse whitespace
     topic = re.sub(r'\s+', ' ', topic)
+
     return topic.strip()
 
 
@@ -105,19 +125,28 @@ def run_setup(state: State, args: dict) -> bool:
     # Extract args
     topic = args.get("topic", "").strip()
     if not topic:
-        print("ERROR: No topic provided")
+        ui.error("No topic provided")
         return False
 
     # Sanitize topic before any use
     topic = _sanitize_topic(topic)
     if not topic:
-        print("ERROR: Topic is empty after sanitization")
+        ui.error("Topic is empty after sanitization")
         return False
 
     state.topic = topic
+    state.brief = args.get("brief", "")
 
     # Determine report directory using new logic
     report_dir = _determine_output_dir(args)
+
+    # Validate resolved path doesn't escape parent (defense in depth)
+    resolved = report_dir.resolve()
+    parent = resolved.parent
+    if not str(resolved).startswith(str(parent)):
+        ui.error("Invalid report directory path")
+        return False
+
     state.report_dir = str(report_dir)
 
     # Set state file path early, before any save() or checkpoint() calls
@@ -140,16 +169,23 @@ def run_setup(state: State, args: dict) -> bool:
         cwd = Path(args.get("cwd") or os.getcwd())
         auto_seeds = _auto_detect_seeds(cwd)
         if auto_seeds:
-            print(f"Auto-detected seed refs: {auto_seeds}")
+            ui.info(f"Auto-detected seed refs: {auto_seeds}")
             state.seed_refs_folder = str(auto_seeds)
 
     state.save()
     state.checkpoint("config_saved")
 
     # Create directory structure
-    print(f"Creating report directory: {report_dir}")
+    ui.step(f"Creating report directory: {report_dir}")
     _create_directories(report_dir)
     state.checkpoint("directories_created")
+
+    # Register in central registry
+    try:
+        from ..registry import registry
+        registry.register(report_dir, topic)
+    except Exception:
+        pass  # Registry is non-critical
 
     # Write initial manifest
     _write_manifest(state)
@@ -167,27 +203,26 @@ def run_setup(state: State, args: dict) -> bool:
         seeds_to_process.extend(state.seed_urls)
 
     if seeds_to_process:
-        print(f"Processing {len(seeds_to_process)} seed references...")
+        ui.step(f"Processing {len(seeds_to_process)} seed references")
         success = _process_seeds(state, seeds_to_process)
         if not success:
-            print("WARNING: Seed processing had errors, continuing anyway")
+            ui.warning("Seed processing had errors, continuing anyway")
         state.seeds_processed = True
         state.checkpoint("seeds_processed")
 
         # Summarize seeds
-        print("Summarizing seeds...")
+        ui.step("Summarizing seeds")
         _summarize_seeds(state)
         state.seeds_summarized = True
         state.checkpoint("seeds_summarized")
 
     # Write scope document
-    print("Writing scope document...")
+    ui.step("Writing scope document")
     _write_scope(state)
     state.scope_written = True
     state.checkpoint("scope_written")
 
     state.mark_phase_complete(1)
-    print("Phase 1 (Setup) complete")
     return True
 
 
@@ -197,7 +232,9 @@ def _slugify(text: str) -> str:
     text = text.lower()
     text = re.sub(r'[^\w\s-]', '', text)
     text = re.sub(r'[\s_-]+', '-', text)
-    return text.strip('-')
+    slug = text.strip('-')
+    # Final safety: use only the basename to prevent any path components
+    return os.path.basename(slug) if slug else "report"
 
 
 def _create_directories(report_dir: Path):
@@ -232,75 +269,158 @@ def _write_manifest(state: State):
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
 
-def _process_seeds(state: State, seeds: list[str]) -> bool:
-    """Process seed references using the process_seeds.py script."""
-    script_path = Path(__file__).parent.parent.parent / "references" / "process_seeds.py"
-
-    if not script_path.exists():
-        print(f"WARNING: process_seeds.py not found at {script_path}")
-        # Fallback: spawn an agent to process seeds
-        return _process_seeds_via_agent(state, seeds)
-
-    cmd = [
-        sys.executable,
-        str(script_path),
-        state.report_dir,
-    ] + seeds + [
-        "--topic", state.topic
-    ]
-
+def _read_excel_file(path: Path) -> str:
+    """Read Excel file and convert to markdown text."""
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            print(f"Seed processing error: {result.stderr}")
-            return False
-        return True
-    except subprocess.TimeoutExpired:
-        print("Seed processing timed out")
-        return False
-    except Exception as e:
-        print(f"Seed processing failed: {e}")
-        return False
+        import openpyxl
+        wb = openpyxl.load_workbook(path, data_only=True)
+
+        output = []
+        for sheet_name in wb.sheetnames:
+            output.append(f"\n## Sheet: {sheet_name}\n")
+            ws = wb[sheet_name]
+
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                if any(cell is not None for cell in row):
+                    rows.append([str(cell) if cell is not None else '' for cell in row])
+
+            if rows:
+                # Create markdown table
+                header = rows[0]
+                output.append("| " + " | ".join(header) + " |")
+                output.append("| " + " | ".join(["---"] * len(header)) + " |")
+                for row in rows[1:]:
+                    # Pad row if needed
+                    while len(row) < len(header):
+                        row.append('')
+                    output.append("| " + " | ".join(row[:len(header)]) + " |")
+
+        return "\n".join(output)
+
+    except ImportError:
+        try:
+            import pandas as pd
+            df_dict = pd.read_excel(path, sheet_name=None)
+
+            output = []
+            for sheet_name, df in df_dict.items():
+                output.append(f"\n## Sheet: {sheet_name}\n")
+                output.append(df.to_markdown(index=False))
+
+            return "\n".join(output)
+
+        except ImportError:
+            return None
+
+
+def _process_seeds(state: State, seeds: list[str]) -> bool:
+    """Process seed references using Claude agents."""
+    return _process_seeds_via_agent(state, seeds)
 
 
 def _process_seeds_via_agent(state: State, seeds: list[str]) -> bool:
-    """Fallback: use a Claude agent to process seeds."""
+    """Process seeds using Claude agents in parallel with progress tracking."""
+    from ..utils import spawn_agents_parallel
+
     report_dir = Path(state.report_dir)
+    tasks = []
 
     for i, seed in enumerate(seeds):
         output_file = report_dir / "full" / "seeds" / f"seed_{i+1}.md"
 
+        # Use brief if available (detailed research instructions), otherwise topic
+        research_instructions = state.brief or state.topic
+
         if seed.startswith("http"):
-            prompt = f"""Fetch and extract the main content from this URL: {seed}
+            prompt = f"""TASK: Fetch URL and save content to file.
 
-Write the extracted content (title, main text, key data) to: {output_file}
+URL: {seed}
+OUTPUT FILE: {output_file}
 
-Focus on factual information relevant to the topic: {state.topic}
+STEPS:
+1. Use WebFetch to get the URL content
+2. Extract the main content (title, key text, data)
+3. Use Write tool to save to {output_file}
+
+Focus on factual information relevant to: {research_instructions}
 Remove navigation, ads, and boilerplate.
+
+CRITICAL: You MUST call the Write tool with file_path="{output_file}" at the end.
 """
+        elif seed.lower().endswith(('.xlsx', '.xls')):
+            # Excel file - pre-read and pass content directly
+            excel_content = _read_excel_file(Path(seed))
+            if excel_content:
+                prompt = f"""TASK: Summarize Excel data.
+
+OUTPUT FILE: {output_file}
+
+<excel_content>
+{excel_content[:50000]}
+</excel_content>
+
+Summarize this Excel data, focusing on information relevant to: {research_instructions}
+
+CRITICAL: You MUST call the Write tool with file_path="{output_file}" at the end.
+"""
+            else:
+                ui.warning(f"Could not read Excel file: {seed} (install openpyxl or pandas)")
+                continue
         else:
-            prompt = f"""Read and summarize this file: {seed}
+            prompt = f"""TASK: Read file and save summary.
 
-Write a summary of key content to: {output_file}
+INPUT FILE: {seed}
+OUTPUT FILE: {output_file}
 
-Focus on information relevant to the topic: {state.topic}
+STEPS:
+1. Use Read tool to read {seed}
+2. Summarize key content relevant to: {research_instructions}
+3. Use Write tool to save summary to {output_file}
+
+CRITICAL: You MUST call the Write tool with file_path="{output_file}" at the end.
 """
 
-        result = spawn_agent(
-            prompt, model="sonnet", output_file=output_file, timeout_secs=300,
-            allowed_tools=["Read", "WebSearch", "WebFetch", "Write"]
-        )
-        if not result.success:
-            print(f"Failed to process seed {seed}: {result.error}")
+        tasks.append({
+            "id": f"seed_{i+1}",
+            "prompt": prompt,
+            "model": "sonnet",
+            "output_file": str(output_file),
+            "timeout_secs": 900,
+            "allowed_tools": ["Read", "WebSearch", "WebFetch", "Write"],
+        })
+
+    if not tasks:
+        return True
+
+    # Progress tracking
+    ui.agent_progress_start(len(tasks), "Processing seeds")
+    completed = [0]
+    lock = threading.Lock()
+
+    def on_complete(task_id: str, result):
+        with lock:
+            completed[0] += 1
+        status = "✓" if result.success else "✗"
+        ui.agent_progress_update(completed[0], f"{task_id}: {status}")
+
+    results = spawn_agents_parallel(tasks, max_workers=5, on_complete=on_complete)
+    ui.agent_progress_complete(f"Processed {len(tasks)} seeds")
+
+    failed = [tid for tid, r in results.items() if not r.success]
+    if failed:
+        ui.warning(f"Failed to process seeds: {failed}")
 
     return True
 
 
 def _summarize_seeds(state: State):
-    """Summarize all processed seeds.
+    """Summarize all processed seeds in parallel with progress tracking.
 
     Reads content directly and passes to summarizer to avoid Read tool failures.
     """
+    from ..utils import spawn_agents_parallel
+
     report_dir = Path(state.report_dir)
     seeds_dir = report_dir / "full" / "seeds"
     summaries_dir = report_dir / "summaries" / "seeds"
@@ -308,6 +428,7 @@ def _summarize_seeds(state: State):
     if not seeds_dir.exists():
         return
 
+    tasks = []
     for seed_file in seeds_dir.glob("*.md"):
         summary_file = summaries_dir / seed_file.name
 
@@ -315,29 +436,57 @@ def _summarize_seeds(state: State):
         try:
             content = seed_file.read_text()
         except Exception as e:
-            print(f"Failed to read {seed_file}: {e}")
+            ui.warning(f"Failed to read {seed_file}: {e}")
             continue
 
-        prompt = f"""Summarize this seed reference for the topic: {state.topic}
+        # Use brief if available (detailed research instructions), otherwise topic
+        research_instructions = state.brief or state.topic
+
+        prompt = f"""TASK: Summarize seed reference content.
+
+OUTPUT FILE: {summary_file}
 
 <content>
 {content}
 </content>
 
-Write a concise summary (300-500 words) to: {summary_file}
-
-Include:
+Write a 300-500 word summary including:
 - Key findings and data points
-- Relevance to topic: {state.topic}
+- Relevance to topic: {research_instructions}
 - Source/citation info if present
+
+CRITICAL: You MUST call Write tool with file_path="{summary_file}" to save your summary.
 """
 
-        result = spawn_agent(
-            prompt, model="haiku", output_file=summary_file, timeout_secs=120,
-            allowed_tools=["Write"]  # Only needs Write when content is passed
-        )
-        if not result.success:
-            print(f"Failed to summarize {seed_file.name}: {result.error}")
+        tasks.append({
+            "id": seed_file.stem,
+            "prompt": prompt,
+            "model": "sonnet",
+            "output_file": str(summary_file),
+            "timeout_secs": 360,
+            "allowed_tools": ["Write"],
+        })
+
+    if not tasks:
+        return
+
+    # Progress tracking
+    ui.agent_progress_start(len(tasks), "Summarizing seeds")
+    completed = [0]
+    lock = threading.Lock()
+
+    def on_complete(task_id: str, result):
+        with lock:
+            completed[0] += 1
+        status = "✓" if result.success else "✗"
+        ui.agent_progress_update(completed[0], f"{task_id}: {status}")
+
+    results = spawn_agents_parallel(tasks, max_workers=5, on_complete=on_complete)
+    ui.agent_progress_complete(f"Summarized {len(tasks)} seeds")
+
+    failed = [tid for tid, r in results.items() if not r.success]
+    if failed:
+        ui.warning(f"Failed to summarize seeds: {failed}")
 
 
 def _write_scope(state: State):
@@ -353,28 +502,31 @@ def _write_scope(state: State):
             content = f.read_text()[:2000]  # Limit per seed
             seed_context += f"\n### {f.stem}\n{content}\n"
 
-    prompt = f"""Write a research scope document for this topic: {state.topic}
+    # Use brief if available (detailed research instructions), otherwise topic
+    research_instructions = state.brief or state.topic
 
+    prompt = f"""TASK: Write research scope document.
+
+Topic: {research_instructions}
 Report type: {state.report_type}
 Expertise level: {state.expertise_level}
 Number of research agents: {state.agent_count}
+OUTPUT FILE: {scope_file}
 
 {f"## Seed Material Context{seed_context}" if seed_context else ""}
 
-Write the scope document to: {scope_file}
-
-Include:
+Include these sections (under 1000 words total):
 1. Research objectives (3-5 bullet points)
 2. Key questions to answer
 3. Boundaries (what's in scope vs out of scope)
 4. Expected sections for the final report
 5. Quality criteria
 
-Keep it under 1000 words.
+CRITICAL: You MUST call Write tool with file_path="{scope_file}" to save the scope document.
 """
 
     result = spawn_agent(
-        prompt, model="opus", output_file=scope_file, timeout_secs=180,
+        prompt, model="opus", output_file=scope_file, timeout_secs=540,
         allowed_tools=["Read", "Write"]
     )
     if not result.success:

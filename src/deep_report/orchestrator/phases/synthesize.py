@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Optional
 
 from ..state import State
-from ..utils import spawn_agent, spawn_agents_parallel, AgentResult, extract_json, AGENT_TOOLS, RoleEnforcer
+from ..utils import spawn_agent, spawn_agents_parallel, extract_json, AGENT_TOOLS, RoleEnforcer
+from ..ui import ui
 
 
 def run_synthesize(state: State) -> bool:
@@ -24,48 +25,47 @@ def run_synthesize(state: State) -> bool:
 
     # Guard: need at least some completed research
     if agent_count == 0:
-        print("ERROR: No completed research to synthesize")
+        ui.error("No completed research to synthesize")
         return False
 
     # Determine synthesis strategy
     if agent_count <= 10:
         state.synthesis_strategy = "single"
-        print(f"Using single-pass synthesis for {agent_count} agents")
+        ui.step(f"Using single-pass synthesis for {agent_count} agents")
         success = _single_pass_synthesis(state, report_dir)
     else:
         state.synthesis_strategy = "multi"
-        print(f"Using multi-pass synthesis for {agent_count} agents")
+        ui.step(f"Using multi-pass synthesis for {agent_count} agents")
         success = _multi_pass_synthesis(state, report_dir)
 
     if not success:
-        print("ERROR: Synthesis failed")
+        ui.error("Synthesis failed")
         return False
 
     state.report_assembled = True
     state.checkpoint("report_assembled")
 
     # Compile references
-    print("Compiling references...")
+    ui.step("Compiling references")
     _compile_references(state, report_dir)
     state.refs_compiled = True
     state.checkpoint("refs_compiled")
 
     # Audio version if requested
     if state.generate_audio:
-        print("Generating audio version...")
+        ui.step("Generating audio version")
         _generate_audio(state, report_dir)
         state.audio_generated = True
         state.checkpoint("audio_generated")
 
     # Download papers if requested
     if state.download_papers:
-        print("Downloading open-access papers...")
+        ui.step("Downloading open-access papers")
         _download_papers(state, report_dir)
         state.papers_downloaded = True
         state.checkpoint("papers_downloaded")
 
     state.mark_phase_complete(4)
-    print("Phase 4 (Synthesize) complete")
     return True
 
 
@@ -78,41 +78,36 @@ def _single_pass_synthesis(state: State, report_dir: Path) -> bool:
     # Gather file paths - agent will read them
     research_files = sorted(full_dir.glob("*.md"))
     if not research_files:
-        print("No research files found")
+        ui.error("No research files found")
         return False
 
     file_list = "\n".join(f"- {f}" for f in research_files)
 
-    prompt = f"""You are a synthesis agent. Write a comprehensive research report.
+    # Use brief if available (detailed research instructions), otherwise topic
+    research_instructions = state.brief or state.topic
 
-## Topic
-{state.topic}
+    prompt = f"""TASK: Synthesize research files into comprehensive report.
 
-## Report Type
-{state.report_type}
+Topic: {research_instructions}
+Report type: {state.report_type}
+Expertise level: {state.expertise_level}
+OUTPUT FILE: {report_file}
 
-## Expertise Level
-{state.expertise_level}
-
-## Research Files
-Read and synthesize these {len(research_files)} research files:
-
+STEPS:
+1. Use Read tool to read each of these {len(research_files)} research files:
 {file_list}
 
-Use the Read tool to read each file, then synthesize their content.
+2. Synthesize content into a comprehensive report with this structure:
+   - Title and metadata
+   - Executive Summary (500-800 words)
+   - Table of Contents
+   - Introduction
+   - Main sections (synthesize by theme, not by source)
+   - Discussion
+   - Conclusions
+   - Future Directions
 
-## Output Requirements
-Write the complete report to: {report_file}
-
-Structure:
-1. Title and metadata
-2. Executive Summary (500-800 words)
-3. Table of Contents
-4. Introduction
-5. Main sections (synthesize by theme, not by source)
-6. Discussion
-7. Conclusions
-8. Future Directions
+3. Use Write tool to save the report
 
 Guidelines:
 - Target 15,000-25,000 words
@@ -122,20 +117,20 @@ Guidelines:
 - Write for {state.expertise_level} readers
 - Use markdown formatting with clear headers
 
-Write ONLY the report content. References will be compiled separately.
+CRITICAL: You MUST call Write tool with file_path="{report_file}" to save the report.
 """
 
     result = spawn_agent(
-        prompt, model="opus", output_file=report_file, timeout_secs=900,
+        prompt, model="opus", output_file=report_file, timeout_secs=2700,
         allowed_tools=AGENT_TOOLS["synthesis"]
     )
 
     if result.success and report_file.exists():
         word_count = RoleEnforcer.count_words_streaming(report_file)
-        print(f"Report written: {word_count:,} words")
+        ui.success(f"Report written: {word_count:,} words")
         return True
 
-    print(f"Single-pass synthesis failed: {result.error}")
+    ui.error(f"Single-pass synthesis failed: {result.error}")
     return False
 
 
@@ -146,37 +141,40 @@ def _multi_pass_synthesis(state: State, report_dir: Path) -> bool:
     summaries_dir = report_dir / "summaries" / "agents"
 
     # Step 1: Cluster agents thematically
-    print("Clustering research threads...")
+    ui.step("Clustering research threads")
     clusters = _cluster_threads(state, summaries_dir)
 
     # Step 2: Spawn synthesis agent per cluster
-    print(f"Synthesizing {len(clusters)} sections in parallel...")
+    ui.step(f"Synthesizing {len(clusters)} sections in parallel")
     synthesis_results = _synthesize_clusters(state, clusters, full_dir, report_dir)
 
     successful_parts = [r for r in synthesis_results if r["success"]]
     if len(successful_parts) < len(clusters) // 2:
-        print(f"Too many synthesis failures: {len(successful_parts)}/{len(clusters)}")
+        ui.error(f"Too many synthesis failures: {len(successful_parts)}/{len(clusters)}")
         return False
 
     state.synthesis_parts = [p["file"] for p in successful_parts]
     state.save()
 
     # Step 3: Write header, transitions, conclusion
-    print("Writing report header and conclusion...")
+    ui.step("Writing report header and conclusion")
     header_file = report_dir / "state" / "report_header.md"
     conclusion_file = report_dir / "state" / "report_conclusion.md"
 
-    _write_header(state, report_dir, header_file, successful_parts)
-    _write_conclusion(state, report_dir, conclusion_file, successful_parts)
+    header_ok = _write_header(state, report_dir, header_file, successful_parts)
+    conclusion_ok = _write_conclusion(state, report_dir, conclusion_file, successful_parts)
+
+    if not header_ok or not conclusion_ok:
+        ui.warning("Header or conclusion generation had issues, continuing with available content")
 
     # Step 4: Assemble final report
-    print("Assembling final report...")
+    ui.step("Assembling final report")
     report_file = report_dir / "report.md"
     _assemble_report(report_file, header_file, successful_parts, conclusion_file)
 
     if report_file.exists():
         word_count = RoleEnforcer.count_words_streaming(report_file)
-        print(f"Report assembled: {word_count:,} words")
+        ui.success(f"Report assembled: {word_count:,} words")
         return True
 
     return False
@@ -194,10 +192,13 @@ def _cluster_threads(state: State, summaries_dir: Path) -> list[dict]:
 
     num_clusters = min(5, max(2, len(thread_summaries) // 4))
 
+    # Use brief if available (detailed research instructions), otherwise topic
+    research_instructions = state.brief or state.topic
+
     prompt = f"""Cluster these research threads into {num_clusters} thematic groups.
 
 ## Topic
-{state.topic}
+{research_instructions}
 
 ## Threads
 {chr(10).join(thread_summaries)}
@@ -218,7 +219,7 @@ Group related threads together. Every thread must be assigned to exactly one clu
 """
 
     result = spawn_agent(
-        prompt, model="sonnet", timeout_secs=120,
+        prompt, model="sonnet", timeout_secs=360,
         allowed_tools=AGENT_TOOLS["decision"]  # Read-only, output via stdout
     )
 
@@ -275,34 +276,31 @@ def _synthesize_clusters(
         file_list = "\n".join(f"- {f}" for f in cluster_files)
         output_file = report_dir / "state" / f"part_{cluster_id}_synthesis.md"
 
-        prompt = f"""Synthesize these research outputs into a coherent report section.
+        # Use brief if available (detailed research instructions), otherwise topic
+        research_instructions = state.brief or state.topic
 
-## Topic
-{state.topic}
+        prompt = f"""TASK: Synthesize research files into report section.
 
-## Section
-**Title:** {title}
-**Theme:** {theme}
+Topic: {research_instructions}
+Section Title: {title}
+Theme: {theme}
+OUTPUT FILE: {output_file}
 
-## Source Files
-Read and synthesize these {len(cluster_files)} research files:
-
+STEPS:
+1. Use Read tool to read each of these {len(cluster_files)} research files:
 {file_list}
 
-Use the Read tool to read each file, then synthesize their content.
+2. Synthesize into a coherent section (5,000-8,000 words):
+   - Integrate findings, don't just summarize each source
+   - Maintain logical flow and narrative
+   - Include specific data and citations
+   - Write for {state.expertise_level} readers
+   - Use markdown with ## and ### subsection headers
+   - Do NOT include title or executive summary
 
-## Output Requirements
-Write the synthesized section to: {output_file}
+3. Use Write tool to save the section
 
-Guidelines:
-- Target 5,000-8,000 words
-- Integrate findings, don't just summarize each source
-- Maintain logical flow and narrative
-- Include specific data and citations
-- Write for {state.expertise_level} readers
-
-Use markdown with clear subsection headers (## and ###).
-Do NOT include title or executive summary - just the section content.
+CRITICAL: You MUST call Write tool with file_path="{output_file}" to save the section.
 """
 
         tasks.append({
@@ -310,7 +308,7 @@ Do NOT include title or executive summary - just the section content.
             "prompt": prompt,
             "model": "opus",
             "output_file": str(output_file),
-            "timeout_secs": 600,
+            "timeout_secs": 1800,
             "allowed_tools": AGENT_TOOLS["synthesis"],
         })
 
@@ -334,83 +332,105 @@ Do NOT include title or executive summary - just the section content.
     return synthesis_results
 
 
-def _write_header(state: State, report_dir: Path, header_file: Path, parts: list[dict]):
-    """Write report header with executive summary and TOC."""
+def _write_header(state: State, report_dir: Path, header_file: Path, parts: list[dict]) -> bool:
+    """Write report header with executive summary and TOC.
 
+    Returns:
+        True if header was written successfully, False otherwise
+    """
     # Gather part file paths - agent will read them
     part_files = [(p["title"], Path(p["file"])) for p in parts if Path(p["file"]).exists()]
     file_list = "\n".join(f"- **{title}**: {f}" for title, f in part_files)
     section_titles = ", ".join(p["title"] for p in parts)
 
-    prompt = f"""Write the header section for this research report.
+    # Use brief if available (detailed research instructions), otherwise topic
+    research_instructions = state.brief or state.topic
 
-## Topic
-{state.topic}
+    prompt = f"""TASK: Write report header section.
 
-## Report Type
-{state.report_type}
+Topic: {research_instructions}
+Report type: {state.report_type}
+OUTPUT FILE: {header_file}
 
-## Section Files
-Read the beginning of each section file to understand the content:
-
+STEPS:
+1. Use Read tool to read the first ~300 words of each section file:
 {file_list}
 
-Use the Read tool to read each file (just the first ~300 words is enough for context).
+2. Write the header with:
+   - Report title (# heading)
+   - Metadata (date, report type, expertise level)
+   - Executive Summary (500-800 words covering all sections)
+   - Table of Contents (sections: {section_titles})
+   - Introduction (300-500 words setting context)
 
-## Output Requirements
-Write to: {header_file}
+3. Use Write tool to save the header
 
-Include:
-1. Report title (# heading)
-2. Metadata (date, report type, expertise level)
-3. Executive Summary (500-800 words covering all sections)
-4. Table of Contents (list the sections: {section_titles})
-5. Introduction (300-500 words setting context)
-
-Write markdown. Be concise but comprehensive.
+CRITICAL: You MUST call Write tool with file_path="{header_file}" to save the header.
 """
 
-    spawn_agent(
-        prompt, model="opus", output_file=header_file, timeout_secs=300,
+    result = spawn_agent(
+        prompt, model="opus", output_file=header_file, timeout_secs=900,
         allowed_tools=AGENT_TOOLS["synthesis"]
     )
 
+    if not result.success:
+        ui.warning(f"Header generation failed: {result.error}")
+        return False
 
-def _write_conclusion(state: State, report_dir: Path, conclusion_file: Path, parts: list[dict]):
-    """Write report conclusion synthesizing all parts."""
+    if not header_file.exists():
+        ui.warning("Header file not created")
+        return False
 
+    return True
+
+
+def _write_conclusion(state: State, report_dir: Path, conclusion_file: Path, parts: list[dict]) -> bool:
+    """Write report conclusion synthesizing all parts.
+
+    Returns:
+        True if conclusion was written successfully, False otherwise
+    """
     # Gather part file paths - agent will read them
     part_files = [(p["title"], Path(p["file"])) for p in parts if Path(p["file"]).exists()]
     file_list = "\n".join(f"- **{title}**: {f}" for title, f in part_files)
 
-    prompt = f"""Write the conclusion section for this research report.
+    # Use brief if available (detailed research instructions), otherwise topic
+    research_instructions = state.brief or state.topic
 
-## Topic
-{state.topic}
+    prompt = f"""TASK: Write report conclusion section.
 
-## Section Files
-Read the end of each section file to understand the conclusions:
+Topic: {research_instructions}
+OUTPUT FILE: {conclusion_file}
 
+STEPS:
+1. Use Read tool to read the last ~200 words of each section file:
 {file_list}
 
-Use the Read tool to read each file (focus on the last ~200 words for context).
+2. Write the conclusion (1,500-2,500 words) with:
+   - Discussion section (integrate findings across all sections)
+   - Key conclusions (numbered list of main takeaways)
+   - Future directions (what's next for this field)
+   - Limitations (what we didn't cover, caveats)
 
-## Output Requirements
-Write to: {conclusion_file}
+3. Use Write tool to save the conclusion
 
-Include:
-1. Discussion section (integrate findings across all sections)
-2. Key conclusions (numbered list of main takeaways)
-3. Future directions (what's next for this field)
-4. Limitations (what we didn't cover, caveats)
-
-Target 1,500-2,500 words. Write markdown.
+CRITICAL: You MUST call Write tool with file_path="{conclusion_file}" to save the conclusion.
 """
 
-    spawn_agent(
-        prompt, model="opus", output_file=conclusion_file, timeout_secs=300,
+    result = spawn_agent(
+        prompt, model="opus", output_file=conclusion_file, timeout_secs=900,
         allowed_tools=AGENT_TOOLS["synthesis"]
     )
+
+    if not result.success:
+        ui.warning(f"Conclusion generation failed: {result.error}")
+        return False
+
+    if not conclusion_file.exists():
+        ui.warning("Conclusion file not created")
+        return False
+
+    return True
 
 
 def _assemble_report(report_file: Path, header_file: Path, parts: list[dict], conclusion_file: Path):
@@ -445,13 +465,16 @@ def _compile_references(state: State, report_dir: Path):
     if not report_file.exists():
         return
 
-    prompt = f"""Extract and compile all references from this research report.
+    prompt = f"""TASK: Extract and compile references from research report.
 
-Read the report file: {report_file}
+INPUT FILE: {report_file}
+OUTPUT FILE: {refs_file}
 
-Write a deduplicated, organized reference list to: {refs_file}
+STEPS:
+1. Use Read tool to read {report_file}
+2. Extract all references, citations, and URLs
+3. Organize into deduplicated list:
 
-Format:
 # References
 
 ## Academic Papers
@@ -463,11 +486,13 @@ Format:
 ## Web Sources
 - Author/Site. Title. URL. Accessed date.
 
-Remove duplicates. Organize by type. Include all URLs.
+4. Use Write tool to save the references
+
+CRITICAL: You MUST call Write tool with file_path="{refs_file}" to save the references.
 """
 
     spawn_agent(
-        prompt, model="sonnet", output_file=refs_file, timeout_secs=300,
+        prompt, model="sonnet", output_file=refs_file, timeout_secs=900,
         allowed_tools=AGENT_TOOLS["synthesis"]
     )
 
@@ -495,37 +520,39 @@ def _generate_audio(state: State, report_dir: Path):
 def _generate_audio_single(state: State, report_file: Path, audio_file: Path):
     """Single-pass audio generation."""
 
-    prompt = f"""Rewrite this research report for audio/podcast format.
+    prompt = f"""TASK: Rewrite research report for audio/podcast format.
 
-Read the report: {report_file}
+INPUT FILE: {report_file}
+OUTPUT FILE: {audio_file}
 
-Write the audio version to: {audio_file}
+STEPS:
+1. Use Read tool to read {report_file}
+2. Rewrite for audio (60-70% of original word count):
+   - Use conversational, spoken language
+   - Expand abbreviations and acronyms
+   - Replace visual elements (tables, figures) with descriptions
+   - Add transitions between sections ("Now let's explore...")
+   - Prefer shorter sentences (aim for clarity)
+   - Keep technical accuracy
+3. Use Write tool to save the audio version
 
-Guidelines:
-- Use conversational, spoken language
-- Expand abbreviations and acronyms
-- Replace visual elements (tables, figures) with descriptions
-- Add transitions between sections ("Now let's explore...")
-- Prefer shorter sentences (aim for clarity)
-- Keep technical accuracy
-
-Target 60-70% of original word count.
+CRITICAL: You MUST call Write tool with file_path="{audio_file}" to save the audio version.
 """
 
     spawn_agent(
-        prompt, model="opus", output_file=audio_file, timeout_secs=600,
+        prompt, model="opus", output_file=audio_file, timeout_secs=1800,
         allowed_tools=AGENT_TOOLS["synthesis"]
     )
 
 
 def _generate_audio_multi(state: State, report_dir: Path, report_content: str):
-    """Multi-pass audio generation for large reports."""
+    """Multi-pass audio generation for large reports in parallel."""
 
     audio_file = report_dir / "report_audio.md"
 
     # Split by major sections
     sections = report_content.split("\n# ")
-    audio_parts = []
+    tasks = []
 
     for i, section in enumerate(sections):
         if i == 0 and not section.startswith("#"):
@@ -535,25 +562,53 @@ def _generate_audio_multi(state: State, report_dir: Path, report_content: str):
 
         part_file = report_dir / "state" / f"audio_part_{i}.md"
 
-        prompt = f"""Rewrite this section for audio format.
+        prompt = f"""TASK: Rewrite section for audio format.
 
+OUTPUT FILE: {part_file}
+
+<section>
 {section[:15000]}
+</section>
 
-Write to: {part_file}
+Rewrite with:
+- Conversational language
+- Expanded acronyms
+- Shorter sentences
+- Technical accuracy preserved
 
-Use conversational language, expand acronyms, shorter sentences.
-Keep technical accuracy.
+CRITICAL: You MUST call Write tool with file_path="{part_file}" to save.
 """
 
-        result = spawn_agent(
-            prompt, model="opus", output_file=part_file, timeout_secs=300,
-            allowed_tools=AGENT_TOOLS["synthesis"]
-        )
-        if result.success and part_file.exists():
-            audio_parts.append(part_file.read_text())
+        tasks.append({
+            "id": f"audio_{i}",
+            "prompt": prompt,
+            "model": "opus",
+            "output_file": str(part_file),
+            "timeout_secs": 900,
+            "allowed_tools": AGENT_TOOLS["synthesis"],
+        })
 
-    # Combine
-    audio_file.write_text("\n\n---\n\n".join(audio_parts))
+    if not tasks:
+        return
+
+    def on_complete(task_id: str, result):
+        status = "✓" if result.success else "✗"
+        ui.verbose(f"Audio {task_id}: {status}")
+
+    results = spawn_agents_parallel(tasks, max_workers=5, on_complete=on_complete)
+
+    # Combine parts in order
+    audio_parts = []
+    for i in range(len(sections)):
+        part_file = report_dir / "state" / f"audio_part_{i}.md"
+        if part_file.exists():
+            try:
+                audio_parts.append(part_file.read_text())
+            except Exception as e:
+                ui.warning(f"Failed to read audio part {i}: {e}")
+
+    if audio_parts:
+        audio_file.write_text("\n\n---\n\n".join(audio_parts))
 
 
 def _download_papers(state: State, report_dir: Path):
@@ -563,21 +618,21 @@ def _download_papers(state: State, report_dir: Path):
     papers_dir = report_dir / "papers"
 
     if not refs_file.exists():
-        print("No refs.md found, skipping paper downloads")
+        ui.info("No refs.md found, skipping paper downloads")
         return
 
     try:
         from ..papers import PaperDownloader
 
-        print(f"Downloading papers to: {papers_dir}")
+        ui.verbose(f"Downloading papers to: {papers_dir}")
         downloader = PaperDownloader(papers_dir)
         results = downloader.download_all(refs_file)
 
         # Print summary
-        print(f"\n{downloader.get_summary()}")
+        ui.info(downloader.get_summary())
 
     except ImportError:
         # Fallback if requests not installed
-        print("Paper download requires 'requests' library. Skipping.")
+        ui.warning("Paper download requires 'requests' library. Skipping.")
     except Exception as e:
-        print(f"Paper download error: {e}")
+        ui.warning(f"Paper download error: {e}")

@@ -24,6 +24,7 @@ if HAS_PYDANTIC:
     class StateValidator(BaseModel):
         """Pydantic model for state validation."""
         topic: str = ""
+        brief: str = ""
         report_dir: str = ""
         created_at: str = ""
         research_model: str = "sonnet"
@@ -127,6 +128,7 @@ class State:
 
     # Core info
     topic: str = ""
+    brief: str = ""  # Detailed research instructions (if topic is long)
     report_dir: str = ""
     created_at: str = ""
 
@@ -251,6 +253,19 @@ class State:
         self.current_phase = phase
         self.current_step = f"phase_{phase}_complete"
         self.save()
+
+        # Update central registry
+        if self.report_dir:
+            try:
+                from .registry import registry
+                registry.update(
+                    Path(self.report_dir),
+                    phase=phase,
+                    step=self.current_step,
+                    complete=(phase >= 5)
+                )
+            except Exception:
+                pass  # Registry update is non-critical
 
     def checkpoint(self, step: str):
         """Create a checkpoint at the current step."""

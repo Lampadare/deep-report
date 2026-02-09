@@ -10,6 +10,15 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.prompt import Prompt
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
+
 from .progress import ProgressWriter
 from .utils import RoleEnforcer
 
@@ -62,26 +71,75 @@ class ApprovalGate:
         if self.progress:
             self.progress.approval_waiting(gate_id)
 
-        # Display to user
-        print(f"\n{'='*60}")
-        print(f"APPROVAL REQUIRED: {gate_id}")
-        print(f"{'='*60}")
-        for key, value in metadata.items():
-            if isinstance(value, (list, dict)):
-                value = json.dumps(value, indent=2)
-            print(f"  {key}: {value}")
-        print(f"{'='*60}")
-        print("\nOptions:")
-        print("  [y/Enter] Approve and continue")
-        print("  [n]       Reject (skip this step)")
-        print("  [q]       Quit orchestrator")
-        print()
+        # Display to user with Rich if available
+        if RICH_AVAILABLE:
+            console = Console()
+            console.print()
 
-        try:
-            response = input("Approve? [y/n/q]: ").strip().lower()
-        except EOFError:
-            print("\nNo input available, defaulting to reject")
-            response = 'n'
+            # Build metadata table
+            table = Table(show_header=False, box=None, padding=(0, 2))
+            table.add_column("Key", style="dim cyan")
+            table.add_column("Value", style="white")
+
+            for key, value in metadata.items():
+                if isinstance(value, list):
+                    if value:
+                        value = "\n".join(f"• {v}" for v in value)
+                    else:
+                        value = "(none)"
+                elif isinstance(value, dict):
+                    value = json.dumps(value, indent=2)
+                key_display = key.replace("_", " ").title()
+                table.add_row(key_display, str(value))
+
+            # Create panel with table
+            console.print(Panel(
+                table,
+                title=f"[bold yellow]⏸ APPROVAL REQUIRED[/]",
+                subtitle=f"[dim]{gate_id}[/]",
+                border_style="yellow",
+                padding=(1, 2)
+            ))
+
+            # Options
+            console.print()
+            console.print("[bold]Options:[/]")
+            console.print("  [green]y[/] / [green]Enter[/]  Approve and continue")
+            console.print("  [yellow]n[/]          Reject (skip this step)")
+            console.print("  [red]q[/]          Quit orchestrator")
+            console.print()
+
+            try:
+                response = Prompt.ask(
+                    "[bold]Approve?[/]",
+                    choices=["y", "n", "q", ""],
+                    default="y",
+                    show_choices=False
+                ).strip().lower()
+            except EOFError:
+                console.print("\n[yellow]No input available, defaulting to reject[/]")
+                response = 'n'
+        else:
+            # Fallback to plain text
+            print(f"\n{'='*60}")
+            print(f"APPROVAL REQUIRED: {gate_id}")
+            print(f"{'='*60}")
+            for key, value in metadata.items():
+                if isinstance(value, (list, dict)):
+                    value = json.dumps(value, indent=2)
+                print(f"  {key}: {value}")
+            print(f"{'='*60}")
+            print("\nOptions:")
+            print("  [y/Enter] Approve and continue")
+            print("  [n]       Reject (skip this step)")
+            print("  [q]       Quit orchestrator")
+            print()
+
+            try:
+                response = input("Approve? [y/n/q]: ").strip().lower()
+            except EOFError:
+                print("\nNo input available, defaulting to reject")
+                response = 'n'
 
         approved = response in ('y', 'yes', '')
 

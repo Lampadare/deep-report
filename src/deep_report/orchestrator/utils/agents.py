@@ -15,11 +15,11 @@ from typing import Optional, Callable
 from dataclasses import dataclass
 
 
-# Default timeouts (generous to handle memory pressure)
-DEFAULT_TIMEOUT = 1800  # 30 minutes for research/synthesis
-DECISION_TIMEOUT = 360  # 6 minutes
-SUMMARY_TIMEOUT = 540   # 9 minutes
-PLANNING_TIMEOUT = 540  # 9 minutes
+# Default timeouts (tripled to handle memory pressure and complex tasks)
+DEFAULT_TIMEOUT = 5400  # 90 minutes for research/synthesis
+DECISION_TIMEOUT = 1080  # 18 minutes
+SUMMARY_TIMEOUT = 1620   # 27 minutes
+PLANNING_TIMEOUT = 1620  # 27 minutes
 
 
 # Tool access presets for different agent roles
@@ -94,17 +94,25 @@ class CircuitBreaker:
         Returns:
             True if we can proceed, False if still blocked after waiting
         """
-        if self.should_proceed():
-            return True
+        with self._lock:
+            if not self.is_open:
+                return True
+            # Check if timeout elapsed (half-open state)
+            if time.time() - self.last_failure_time > self.reset_timeout:
+                self.is_open = False
+                self.failure_count = 0
+                return True
+            remaining = self.reset_timeout - (time.time() - self.last_failure_time)
 
-        remaining = self.reset_timeout - (time.time() - self.last_failure_time)
+        # Sleep outside lock to avoid blocking other threads
         if remaining > 0:
             print(f"  Circuit breaker open, waiting {remaining:.0f}s...")
             time.sleep(remaining)
 
-        # Reset after waiting
-        self.is_open = False
-        self.failure_count = 0
+        # Re-acquire lock to reset state
+        with self._lock:
+            self.is_open = False
+            self.failure_count = 0
         return True
 
 
@@ -147,7 +155,7 @@ def spawn_agent(
 
     Args:
         prompt: The prompt to send to Claude
-        model: Model to use (sonnet, opus, haiku)
+        model: Model to use (sonnet, opus)
         output_file: If provided, agent will write output here
         timeout_secs: Maximum time to wait
         cwd: Working directory for the agent
@@ -164,10 +172,6 @@ def spawn_agent(
     # Add tool restrictions if specified
     if allowed_tools:
         cmd.extend(["--allowedTools", ",".join(allowed_tools)])
-
-    # Add output file instruction to prompt if needed
-    if output_file:
-        prompt = f"{prompt}\n\nWrite your complete output to: {output_file}\nUse the Write tool with that exact path."
 
     try:
         result = subprocess.run(
@@ -192,11 +196,17 @@ def spawn_agent(
                 )
             elif output_file:
                 # Agent didn't write the file - mark as failure
+                # Include stderr and last part of stdout for debugging
+                debug_info = ""
+                if result.stderr:
+                    debug_info = f" stderr: {result.stderr[:200]}"
+                elif result.stdout:
+                    debug_info = f" (agent output: {result.stdout[-300:][:150]}...)"
                 return AgentResult(
                     success=False,
                     output=result.stdout,
                     duration_secs=duration,
-                    error="Output file not created by agent"
+                    error=f"Output file not created by agent{debug_info}"
                 )
             else:
                 return AgentResult(
@@ -242,7 +252,7 @@ def spawn_agent_with_retry(
 
     Args:
         prompt: The prompt to send to Claude
-        model: Model to use (sonnet, opus, haiku)
+        model: Model to use (sonnet, opus)
         output_file: If provided, agent will write output here
         timeout_secs: Maximum time to wait per attempt
         cwd: Working directory for the agent
@@ -353,7 +363,10 @@ def spawn_agents_parallel(
             results[task_id] = result
 
             if on_complete:
-                on_complete(task_id, result)
+                try:
+                    on_complete(task_id, result)
+                except Exception as e:
+                    print(f"  Warning: on_complete callback failed for {task_id}: {e}")
 
     return results
 
@@ -415,66 +428,3 @@ Be conservative - only request more research if genuinely needed.
     return {"sufficient": True, "reasoning": "Could not parse decision", "gaps": [], "conflicts": [], "deepen": []}
 
 
-def spawn_summarizer(
-    input_file: Path,
-    output_file: Path,
-    topic: str,
-    model: str = "haiku",
-    content: str = None,
-) -> AgentResult:
-    """Spawn a summarization agent.
-
-    Args:
-        input_file: Path to input file (for reference in prompt)
-        output_file: Path where summary should be written
-        topic: Research topic for context
-        model: Model to use (default: haiku for speed/cost)
-        content: If provided, content is passed directly instead of using Read tool
-
-    Returns:
-        AgentResult with success status
-    """
-    if content:
-        # Pass content directly - no Read tool needed
-        prompt = f"""Summarize this research output for the topic: {topic}
-
-<content>
-{content}
-</content>
-
-Write a summary to: {output_file}
-
-Format:
-- 5-10 bullet points of key findings
-- Use [FINDING-HIGH/MEDIUM/LOW] confidence prefixes
-- Include source citations
-- Keep under 500 words
-- Preserve quantitative data and specific claims
-
-Use the Write tool to write the summary.
-"""
-        return spawn_agent(
-            prompt, model=model, output_file=output_file, timeout_secs=SUMMARY_TIMEOUT,
-            allowed_tools=["Write"]  # Only needs Write when content is passed
-        )
-    else:
-        # Fallback: agent reads the file
-        prompt = f"""Summarize this research output for the topic: {topic}
-
-Read the file: {input_file}
-
-Write a summary to: {output_file}
-
-Format:
-- 5-10 bullet points of key findings
-- Use [FINDING-HIGH/MEDIUM/LOW] confidence prefixes
-- Include source citations
-- Keep under 500 words
-- Preserve quantitative data and specific claims
-
-Use the Read tool to read the input, then Write tool to write the summary.
-"""
-        return spawn_agent(
-            prompt, model=model, output_file=output_file, timeout_secs=SUMMARY_TIMEOUT,
-            allowed_tools=AGENT_TOOLS["summarizer"]
-        )

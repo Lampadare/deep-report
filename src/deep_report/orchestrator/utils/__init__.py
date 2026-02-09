@@ -5,7 +5,6 @@ from .agents import (
     spawn_agent_with_retry,
     spawn_agents_parallel,
     spawn_decision_agent,
-    spawn_summarizer,
     AgentResult,
     CircuitBreaker,
     AGENT_TOOLS,

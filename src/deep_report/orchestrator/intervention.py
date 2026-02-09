@@ -9,6 +9,15 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.prompt import Prompt
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
+
 from .progress import ProgressWriter
 
 
@@ -45,30 +54,74 @@ class InterventionHandler:
         if self.progress:
             self.progress.intervention_needed(issue)
 
-        print(f"\n{'!'*60}")
-        print(f"INTERVENTION REQUIRED")
-        print(f"{'!'*60}")
-        print(f"\nIssue: {issue}")
-        print(f"\nDetails:")
-        for key, value in details.items():
-            print(f"  {key}: {value}")
+        if RICH_AVAILABLE:
+            console = Console()
+            console.print()
 
-        if suggested_fix:
-            print(f"\nSuggested fix: {suggested_fix}")
+            # Build details table
+            table = Table(show_header=False, box=None, padding=(0, 2))
+            table.add_column("Key", style="dim cyan")
+            table.add_column("Value", style="white")
 
-        print(f"\nIntervention file: {self.intervention_file}")
-        print(f"\n{'!'*60}")
-        print("\nOptions:")
-        print("  [r/Enter] Retry after fixing the issue")
-        print("  [s]       Skip this task and continue")
-        print("  [q]       Quit orchestrator")
-        print()
+            table.add_row("Issue", f"[bold red]{issue}[/]")
+            for key, value in details.items():
+                key_display = key.replace("_", " ").title()
+                table.add_row(key_display, str(value))
 
-        try:
-            response = input("Action? [r/s/q]: ").strip().lower()
-        except EOFError:
-            print("\nNo input available, defaulting to skip")
-            response = 's'
+            if suggested_fix:
+                table.add_row("Suggested Fix", f"[green]{suggested_fix}[/]")
+
+            table.add_row("Intervention File", f"[dim]{self.intervention_file}[/]")
+
+            console.print(Panel(
+                table,
+                title="[bold red]⚠ INTERVENTION REQUIRED[/]",
+                border_style="red",
+                padding=(1, 2)
+            ))
+
+            console.print()
+            console.print("[bold]Options:[/]")
+            console.print("  [green]r[/] / [green]Enter[/]  Retry after fixing the issue")
+            console.print("  [yellow]s[/]          Skip this task and continue")
+            console.print("  [red]q[/]          Quit orchestrator")
+            console.print()
+
+            try:
+                response = Prompt.ask(
+                    "[bold]Action?[/]",
+                    choices=["r", "s", "q", ""],
+                    default="r",
+                    show_choices=False
+                ).strip().lower()
+            except EOFError:
+                console.print("\n[yellow]No input available, defaulting to skip[/]")
+                response = 's'
+        else:
+            print(f"\n{'!'*60}")
+            print(f"INTERVENTION REQUIRED")
+            print(f"{'!'*60}")
+            print(f"\nIssue: {issue}")
+            print(f"\nDetails:")
+            for key, value in details.items():
+                print(f"  {key}: {value}")
+
+            if suggested_fix:
+                print(f"\nSuggested fix: {suggested_fix}")
+
+            print(f"\nIntervention file: {self.intervention_file}")
+            print(f"\n{'!'*60}")
+            print("\nOptions:")
+            print("  [r/Enter] Retry after fixing the issue")
+            print("  [s]       Skip this task and continue")
+            print("  [q]       Quit orchestrator")
+            print()
+
+            try:
+                response = input("Action? [r/s/q]: ").strip().lower()
+            except EOFError:
+                print("\nNo input available, defaulting to skip")
+                response = 's'
 
         if response == 'q':
             request["status"] = "quit"

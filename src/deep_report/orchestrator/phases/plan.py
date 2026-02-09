@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 
 from ..state import State
-from ..utils import spawn_agent, AgentResult, extract_json
+from ..utils import spawn_agent, extract_json
+from ..ui import ui
 
 
 # Cost estimates per 1K tokens (approximate)
@@ -38,11 +39,11 @@ def run_plan(state: State) -> bool:
     seed_context = _gather_seed_summaries(report_dir)
 
     # Generate research plan
-    print("Generating research plan...")
+    ui.step("Generating research plan")
     plan = _generate_plan(state, scope_content, seed_context)
 
     if not plan:
-        print("ERROR: Failed to generate research plan")
+        ui.error("Failed to generate research plan")
         return False
 
     state.threads = plan["threads"]
@@ -57,8 +58,8 @@ def run_plan(state: State) -> bool:
     state.checkpoint("plan_written")
     state.mark_phase_complete(2)
 
-    print(f"Phase 2 (Plan) complete: {len(state.threads)} research threads")
-    print(f"Estimated cost: ${state.estimated_cost:.2f}")
+    ui.info(f"{len(state.threads)} research threads planned")
+    ui.info(f"Estimated cost: ${state.estimated_cost:.2f}")
     return True
 
 
@@ -79,10 +80,13 @@ def _gather_seed_summaries(report_dir: Path) -> str:
 def _generate_plan(state: State, scope: str, seed_context: str) -> dict | None:
     """Use an agent to generate the research plan."""
 
+    # Use brief if available (detailed research instructions), otherwise topic
+    research_instructions = state.brief or state.topic
+
     prompt = f"""You are a research planning agent. Create a research plan for this topic.
 
 ## Topic
-{state.topic}
+{research_instructions}
 
 ## Report Type
 {state.report_type}
@@ -122,10 +126,10 @@ Return a JSON object (and ONLY valid JSON, no other text):
 Generate exactly {state.agent_count} threads.
 """
 
-    result = spawn_agent(prompt, model="opus", timeout_secs=180, allowed_tools=["Read"])
+    result = spawn_agent(prompt, model="opus", timeout_secs=540, allowed_tools=["Read"])
 
     if not result.success:
-        print(f"Plan generation failed: {result.error}")
+        ui.error(f"Plan generation failed: {result.error}")
         return None
 
     # Parse JSON from output
@@ -134,7 +138,7 @@ Generate exactly {state.agent_count} threads.
         plan["estimated_cost"] = _estimate_cost(state, len(plan.get("threads", [])))
         return plan
 
-    print("Failed to parse plan JSON")
+    ui.error("Failed to parse plan JSON")
     return None
 
 
@@ -143,7 +147,7 @@ def _estimate_cost(state: State, thread_count: int) -> float:
     research_model = state.research_model
     research_rates = COST_PER_1K.get(research_model, COST_PER_1K["sonnet"])
     opus_rates = COST_PER_1K["opus"]
-    haiku_rates = COST_PER_1K["haiku"]
+    sonnet_rates = COST_PER_1K["sonnet"]
 
     # Estimates per agent (in 1K tokens)
     input_per_agent = 8  # Prompt + context
@@ -160,10 +164,10 @@ def _estimate_cost(state: State, thread_count: int) -> float:
     research_output = thread_count * output_per_agent
     research_cost = (research_input * research_rates["input"]) + (research_output * research_rates["output"])
 
-    # Summarization (Haiku)
+    # Summarization (Sonnet)
     summary_input = thread_count * 6  # Reading outputs
     summary_output = thread_count * 1  # Summaries
-    summary_cost = (summary_input * haiku_rates["input"]) + (summary_output * haiku_rates["output"])
+    summary_cost = (summary_input * sonnet_rates["input"]) + (summary_output * sonnet_rates["output"])
 
     # Decision agent iterations (Opus, estimate 2 iterations)
     decision_cost = 2 * (4 * opus_rates["input"] + 1 * opus_rates["output"])
