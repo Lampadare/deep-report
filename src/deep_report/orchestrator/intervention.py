@@ -49,6 +49,7 @@ class InterventionHandler:
             "requested_at": datetime.now().isoformat(),
             "status": "pending",
         }
+        self.intervention_file.parent.mkdir(parents=True, exist_ok=True)
         self.intervention_file.write_text(json.dumps(request, indent=2))
 
         if self.progress:
@@ -123,24 +124,24 @@ class InterventionHandler:
                 print("\nNo input available, defaulting to skip")
                 response = 's'
 
+        # KeyboardInterrupt is used for quit to halt execution cleanly
         if response == 'q':
             request["status"] = "quit"
             request["responded_at"] = datetime.now().isoformat()
             self.intervention_file.write_text(json.dumps(request, indent=2))
             raise KeyboardInterrupt("User quit at intervention")
 
+        # Explicit fallthrough: skip takes precedence over retry
         if response == 's':
             request["status"] = "skipped"
             request["responded_at"] = datetime.now().isoformat()
             self.intervention_file.write_text(json.dumps(request, indent=2))
             return False
 
-        # User wants to retry
+        # User wants to retry (r or Enter)
         request["status"] = "retrying"
         request["responded_at"] = datetime.now().isoformat()
-        self.intervention_file.write_text(json.dumps(request, indent=2))
-
-        # Clear the intervention file on successful retry intent
+        # Remove file on retry to signal completion, no intermediate write needed
         self.intervention_file.unlink(missing_ok=True)
         return True
 

@@ -13,8 +13,8 @@ class RoleEnforcer:
     """Enforces role-based file access restrictions."""
 
     ORCHESTRATOR_FORBIDDEN = [
-        "full/agents/*.md",
-        "full/seeds/*.md",
+        ("full", "agents", "*.md"),
+        ("full", "seeds", "*.md"),
     ]
 
     @classmethod
@@ -33,8 +33,22 @@ class RoleEnforcer:
         except ValueError:
             return  # Path not under report_dir, allow
 
-        for pattern in cls.ORCHESTRATOR_FORBIDDEN:
-            if rel.match(pattern):
+        rel_parts = rel.parts
+        for pattern_parts in cls.ORCHESTRATOR_FORBIDDEN:
+            if len(rel_parts) != len(pattern_parts):
+                continue
+            match = True
+            for rel_part, pattern_part in zip(rel_parts, pattern_parts):
+                if pattern_part.startswith("*"):
+                    # Glob pattern - check suffix
+                    suffix = pattern_part[1:]
+                    if not rel_part.endswith(suffix):
+                        match = False
+                        break
+                elif rel_part != pattern_part:
+                    match = False
+                    break
+            if match:
                 raise PermissionError(f"Orchestrator cannot read {rel}")
 
     @classmethod
@@ -45,12 +59,15 @@ class RoleEnforcer:
             path: Path to file to count words in
 
         Returns:
-            Word count
+            Word count, or 0 if file cannot be read
         """
         count = 0
-        with open(path) as f:
-            for line in f:
-                count += len(line.split())
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    count += len(line.split())
+        except FileNotFoundError:
+            return 0
         return count
 
     @classmethod

@@ -5,6 +5,7 @@ Writes progress updates as JSON-lines for structured parsing.
 Also supports legacy .log format for backwards compatibility.
 """
 
+import fcntl
 import json
 import time
 from pathlib import Path
@@ -13,7 +14,12 @@ from typing import Optional
 
 
 class ProgressWriter:
-    """Writes progress updates as JSON-lines."""
+    """Writes progress updates as JSON-lines.
+
+    Note: start_time is set at construction. If reusing a ProgressWriter
+    instance across sessions, elapsed times will be relative to the original
+    construction time. Create a new instance if you need fresh timing.
+    """
 
     def __init__(self, report_dir: Path):
         self.report_dir = Path(report_dir)
@@ -35,7 +41,7 @@ class ProgressWriter:
         return time.time() - self.start_time
 
     def _write_event(self, event_type: str, data: dict):
-        """Write a JSON-lines event."""
+        """Write a JSON-lines event with file locking."""
         event = {
             "timestamp": datetime.now().isoformat(),
             "elapsed_secs": round(self._elapsed_secs(), 2),
@@ -44,7 +50,12 @@ class ProgressWriter:
         }
         try:
             with open(self.progress_file, "a") as f:
-                f.write(json.dumps(event) + "\n")
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.write(json.dumps(event) + "\n")
+                    f.flush()
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         except OSError as e:
             print(f"Warning: Could not write progress: {e}")
 

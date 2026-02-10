@@ -66,7 +66,11 @@ class ApprovalGate:
             "status": "pending",
             "requested_at": datetime.now().isoformat(),
         }
-        self.approval_file.write_text(json.dumps(request, indent=2))
+        try:
+            self.approval_file.parent.mkdir(parents=True, exist_ok=True)
+            self.approval_file.write_text(json.dumps(request, indent=2))
+        except Exception:
+            pass
 
         if self.progress:
             self.progress.approval_waiting(gate_id)
@@ -141,7 +145,16 @@ class ApprovalGate:
                 print("\nNo input available, defaulting to reject")
                 response = 'n'
 
-        approved = response in ('y', 'yes', '')
+        # Explicit handling of responses to avoid double approval on empty input
+        if response == 'q':
+            approved = False
+        elif response in ('n', 'no'):
+            approved = False
+        elif response in ('y', 'yes', ''):
+            approved = True
+        else:
+            # Treat unexpected input as rejection
+            approved = False
 
         if response == 'q':
             request["status"] = "quit"
@@ -178,21 +191,32 @@ class ApprovalGate:
                 # Stream word count without loading full content
                 total_words += RoleEnforcer.count_words_streaming(f)
 
+        # Defensive checks for state attributes
+        failed_threads = getattr(state, 'failed_threads', [])
+        research_iteration = getattr(state, 'research_iteration', 0)
+        max_iterations = getattr(state, 'max_iterations', 1)
+
         return {
             "completed_agents": completed_count,
-            "failed_agents": len(state.failed_threads),
+            "failed_agents": len(failed_threads),
             "total_research_words": f"{total_words:,}",
-            "iteration": state.research_iteration,
-            "max_iterations": state.max_iterations,
+            "iteration": research_iteration,
+            "max_iterations": max_iterations,
         }
 
     def pre_research_gate(self, state) -> bool:
         """Approval gate before starting research."""
+        # Defensive checks for state attributes
+        threads = getattr(state, 'threads', [])
+        research_model = getattr(state, 'research_model', 'unknown')
+        estimated_cost = getattr(state, 'estimated_cost', 0.0)
+        max_iterations = getattr(state, 'max_iterations', 1)
+
         metadata = {
-            "threads_to_run": len(state.threads),
-            "model": state.research_model,
-            "estimated_cost": f"${state.estimated_cost:.2f}",
-            "max_iterations": state.max_iterations,
+            "threads_to_run": len(threads),
+            "model": research_model,
+            "estimated_cost": f"${estimated_cost:.2f}",
+            "max_iterations": max_iterations,
         }
         return self.request_approval("pre_research", metadata)
 

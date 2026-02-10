@@ -90,6 +90,7 @@ def _prompt_choice(prompt: str, options: list[str], default: int = 0, allow_othe
         ).ask()
 
         if result is None:  # Ctrl+C or Ctrl+D
+            ui.info(f"Using default: {options[default]}")
             return options[default]
 
         if allow_other and result == "Other (specify)":
@@ -139,9 +140,13 @@ def _prompt_int(prompt: str, default: int, min_val: int, max_val: int) -> int:
                 return True  # Allow empty for default
             try:
                 val = int(text)
-                return min_val <= val <= max_val
+                if val < min_val:
+                    return f"Value must be at least {min_val}"
+                if val > max_val:
+                    return f"Value must be at most {max_val}"
+                return True
             except ValueError:
-                return False
+                return "Please enter a valid number"
 
         result = questionary.text(
             f"{prompt} [{min_val}-{max_val}]",
@@ -602,7 +607,7 @@ Examples:
             "agent_count": max(3, min(args.agents, 30)),
             "seed_urls": seed_urls,
             "seed_refs_folder": seed_folder,
-            "download_papers": args.download_papers or True,  # Default to True in quick mode
+            "download_papers": True if not args.download_papers else args.download_papers,  # Default to True in quick mode
             "generate_audio": args.audio,
             "expertise_level": args.expertise,
             "report_type": args.report_type,
@@ -992,9 +997,9 @@ def resume_report(report_dir: Path, ctx: OrchestratorContext) -> int:
 def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext) -> int:
     """Continue execution from a specific phase."""
 
-    # Ensure state file path is set
+    # Ensure state file path is set (only set and save if not already set)
+    state_file = Path(state.report_dir) / "state" / "orchestrator_state.json"
     if not state._state_file:
-        state_file = Path(state.report_dir) / "state" / "orchestrator_state.json"
         state._state_file = str(state_file)
         state.save()
 
@@ -1007,7 +1012,7 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
     verbose_toggle = VerboseToggle(on_toggle=on_verbose_toggle)
     toggle_available = verbose_toggle.start()
     if toggle_available:
-        ui.info("Press 'v' to toggle verbose output")
+        ui.verbose("Press 'v' to toggle verbose output")
     elif ctx.verbose:
         ui.info("Verbose mode enabled via --verbose flag")
 

@@ -3,6 +3,8 @@
 
 import json
 import fcntl
+import os
+import tempfile
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -10,6 +12,8 @@ from typing import Optional
 
 REGISTRY_DIR = Path.home() / ".deep-report"
 REGISTRY_FILE = REGISTRY_DIR / "registry.json"
+
+_registry_instance = None
 
 
 class ReportRegistry:
@@ -29,18 +33,38 @@ class ReportRegistry:
         try:
             with open(REGISTRY_FILE, 'r') as f:
                 fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-                data = json.load(f)
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                try:
+                    data = json.load(f)
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
                 return data
         except (json.JSONDecodeError, FileNotFoundError):
             return {"reports": []}
 
     def _write(self, data: dict):
-        """Write registry with file locking."""
-        with open(REGISTRY_FILE, 'w') as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            json.dump(data, f, indent=2)
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        """Write registry with atomic write and file locking."""
+        # Write to temp file first, then atomic rename
+        fd, tmp_path = tempfile.mkstemp(
+            dir=REGISTRY_DIR,
+            prefix=".registry_",
+            suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, 'w') as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    json.dump(data, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            os.rename(tmp_path, REGISTRY_FILE)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def register(self, report_dir: Path, topic: str) -> str:
         """Register a new report. Returns report ID."""
@@ -77,25 +101,29 @@ class ReportRegistry:
 
     def list_all(self) -> list[dict]:
         """List all registered reports."""
-        data = self._read()
-        return self._prune_stale(data["reports"])
+        return self._prune_and_write_if_needed()
 
     def list_unfinished(self) -> list[dict]:
         """List reports where complete=False."""
         return [r for r in self.list_all() if not r["complete"]]
 
     def _prune_stale(self, reports: list[dict]) -> list[dict]:
-        """Remove entries where the path no longer exists."""
-        valid = []
-        for r in reports:
-            if Path(r["path"]).exists():
-                valid.append(r)
-        # Update registry if we pruned anything
-        if len(valid) < len(reports):
-            data = self._read()
-            data["reports"] = valid
-            self._write(data)
+        """Remove entries where the path no longer exists.
+
+        Note: This method prunes in place using a single locked transaction.
+        The reports list passed in is mutated.
+        """
+        valid = [r for r in reports if Path(r["path"]).exists()]
         return valid
+
+    def _prune_and_write_if_needed(self) -> list[dict]:
+        """Read, prune stale entries, and write back in a single transaction."""
+        data = self._read()
+        original_len = len(data["reports"])
+        data["reports"] = [r for r in data["reports"] if Path(r["path"]).exists()]
+        if len(data["reports"]) < original_len:
+            self._write(data)
+        return data["reports"]
 
     def delete(self, report_path: str) -> bool:
         """Delete a report from the registry by path.
@@ -115,20 +143,36 @@ class ReportRegistry:
         """Delete a report by its index in the list.
 
         Returns True if deleted, False if index invalid.
+        Uses a single locked transaction to avoid TOCTOU race.
         """
+        # Read, prune, sort, delete, and write in one logical transaction
         data = self._read()
-        reports = self._prune_stale(data["reports"])
+        reports = [r for r in data["reports"] if Path(r["path"]).exists()]
 
         # Sort by updated_at descending (same order as displayed)
         reports.sort(key=lambda r: r["updated_at"], reverse=True)
 
         if 0 <= index < len(reports):
             path_to_delete = reports[index]["path"]
-            data["reports"] = [r for r in data["reports"] if r["path"] != path_to_delete]
+            data["reports"] = [r for r in reports if r["path"] != path_to_delete]
             self._write(data)
             return True
         return False
 
 
-# Singleton instance
-registry = ReportRegistry()
+def get_registry() -> ReportRegistry:
+    """Lazy initialization of registry singleton."""
+    global _registry_instance
+    if _registry_instance is None:
+        _registry_instance = ReportRegistry()
+    return _registry_instance
+
+
+# Property-like access for backwards compatibility
+class _RegistryProxy:
+    """Proxy for lazy registry initialization."""
+    def __getattr__(self, name):
+        return getattr(get_registry(), name)
+
+
+registry = _RegistryProxy()

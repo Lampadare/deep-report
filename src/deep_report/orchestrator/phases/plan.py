@@ -53,7 +53,11 @@ def run_plan(state: State) -> bool:
 
     # Write plan to file
     plan_file = report_dir / "state" / "plan.md"
-    _write_plan_file(state, plan, plan_file)
+    try:
+        _write_plan_file(state, plan, plan_file)
+    except (OSError, PermissionError) as e:
+        ui.error(f"Failed to write plan file: {e}")
+        return False
 
     state.checkpoint("plan_written")
     state.mark_phase_complete(2)
@@ -71,8 +75,11 @@ def _gather_seed_summaries(report_dir: Path) -> str:
 
     context = []
     for f in summaries_dir.glob("*.md"):
-        content = f.read_text()[:1500]
-        context.append(f"### {f.stem}\n{content}")
+        try:
+            content = f.read_text()[:1500]
+            context.append(f"### {f.stem}\n{content}")
+        except (OSError, IOError) as e:
+            ui.warning(f"Failed to read seed file {f.name}: {e}")
 
     return "\n\n".join(context)
 
@@ -126,7 +133,8 @@ Return a JSON object (and ONLY valid JSON, no other text):
 Generate exactly {state.agent_count} threads.
 """
 
-    result = spawn_agent(prompt, model="opus", timeout_secs=540, allowed_tools=["Read"])
+    with ui.spinner_task("Planning agent working..."):
+        result = spawn_agent(prompt, model="opus", timeout_secs=540, allowed_tools=["Read"])
 
     if not result.success:
         ui.error(f"Plan generation failed: {result.error}")
@@ -134,12 +142,17 @@ Generate exactly {state.agent_count} threads.
 
     # Parse JSON from output
     plan = extract_json(result.output)
-    if plan:
-        plan["estimated_cost"] = _estimate_cost(state, len(plan.get("threads", [])))
-        return plan
+    if not plan:
+        ui.error("Failed to parse plan JSON")
+        return None
 
-    ui.error("Failed to parse plan JSON")
-    return None
+    threads = plan.get("threads", [])
+    if not threads:
+        ui.error("Plan has no research threads")
+        return None
+
+    plan["estimated_cost"] = _estimate_cost(state, len(threads))
+    return plan
 
 
 def _estimate_cost(state: State, thread_count: int) -> float:
@@ -238,4 +251,7 @@ def _write_plan_file(state: State, plan: dict, plan_file: Path):
             lines.append(f"- {q}")
         lines.append("")
 
-    plan_file.write_text("\n".join(lines))
+    try:
+        plan_file.write_text("\n".join(lines))
+    except (OSError, PermissionError) as e:
+        raise OSError(f"Failed to write plan file: {e}") from e

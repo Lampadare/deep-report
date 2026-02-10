@@ -92,9 +92,11 @@ def run_research(
             if result.success:
                 if thread_id.startswith("followup_"):
                     _mark_followup_complete(state, thread_id, result)
-                    state.completed_threads.append(thread_id)
+                    if thread_id not in state.completed_threads:
+                        state.completed_threads.append(thread_id)
                 else:
-                    state.completed_threads.append(thread_id)
+                    if thread_id not in state.completed_threads:
+                        state.completed_threads.append(thread_id)
                     state.update_thread(thread_id, status="completed", output_file=result.output_file)
             else:
                 if thread_id.startswith("followup_"):
@@ -125,12 +127,13 @@ def run_research(
             summaries = _gather_all_summaries(report_dir)
             # Use brief if available (detailed research instructions), otherwise topic
             decision_topic = state.brief or state.topic
-            decision = spawn_decision_agent(
-                summaries=summaries,
-                topic=decision_topic,
-                iteration=iteration,
-                max_iterations=max_iterations,
-            )
+            with ui.spinner_task("Decision agent evaluating coverage..."):
+                decision = spawn_decision_agent(
+                    summaries=summaries,
+                    topic=decision_topic,
+                    iteration=iteration,
+                    max_iterations=max_iterations,
+                )
 
             ui.decision(
                 iteration,
@@ -186,8 +189,11 @@ def _gather_seed_context(report_dir: Path) -> str:
 
     context = []
     for f in summaries_dir.glob("*.md"):
-        content = f.read_text()[:1000]
-        context.append(f"[{f.stem}]: {content[:500]}...")
+        try:
+            content = f.read_text()[:1000]
+            context.append(f"[{f.stem}]: {content[:500]}...")
+        except (OSError, IOError) as e:
+            ui.warning(f"Failed to read seed context {f.name}: {e}")
 
     if context:
         return "\n\n## Background Context\n" + "\n\n".join(context)
@@ -241,6 +247,15 @@ def _run_research_batch(
             "allowed_tools": AGENT_TOOLS["research"],
         })
 
+    # Build thread info for live table display
+    thread_info = [{"id": t["id"], "title": t.get("title", t["id"])[:30]} for t in tasks]
+    ui.research_table_start(thread_info, title=f"RESEARCH AGENTS (Iteration {iteration})")
+
+    # Mark first batch as running (up to max_workers)
+    max_workers = 10
+    for t in thread_info[:max_workers]:
+        ui.research_table_update(t["id"], "running")
+
     # Progress callback with thread-safe counter
     completed = [0]
     total = len(tasks)
@@ -250,11 +265,18 @@ def _run_research_batch(
         with completed_lock:
             completed[0] += 1
             current = completed[0]
-        status = "✓" if result.success else "✗"
-        retries = f" [{result.retries} retries]" if result.retries > 0 else ""
-        ui.verbose(f"[{current}/{total}] {task_id}: {status}{retries}")
 
-        # Verbose output: show duration and error details
+        # Update table status
+        status = "complete" if result.success else "failed"
+        ui.research_table_update(task_id, status, result.duration_secs)
+
+        # Mark next pending thread as running (thread-safe via UI method)
+        ui.research_table_mark_next_running()
+
+        # Verbose output
+        status_sym = "✓" if result.success else "✗"
+        retries = f" [{result.retries} retries]" if result.retries > 0 else ""
+        ui.verbose(f"[{current}/{total}] {task_id}: {status_sym}{retries}")
         ui.verbose(f"  Duration: {result.duration_secs:.1f}s")
         if not result.success:
             ui.verbose(f"  Error: {result.error[:200]}")
@@ -265,7 +287,9 @@ def _run_research_batch(
                 result.duration_secs, result.retries
             )
 
-    return spawn_agents_parallel(tasks, max_workers=10, on_complete=on_complete)
+    results = spawn_agents_parallel(tasks, max_workers=max_workers, on_complete=on_complete)
+    ui.research_table_complete()
+    return results
 
 
 def _build_research_prompt(
@@ -403,13 +427,23 @@ CRITICAL: You MUST call Write tool with file_path="{summary_file}" to save your 
     if not tasks:
         return
 
+    # Progress tracking for summarization
+    ui.agent_progress_start(len(tasks), "Summarizing research")
+    completed_count = [0]
+    completed_lock = threading.Lock()
+
     def on_complete(task_id: str, result):
+        with completed_lock:
+            completed_count[0] += 1
+            current = completed_count[0]
         status = "✓" if result.success else "✗"
+        ui.agent_progress_update(current, f"{task_id}: {status}")
         ui.verbose(f"Summary {task_id}: {status}")
 
-    results = spawn_agents_parallel(tasks, max_workers=10, on_complete=on_complete)
+    summary_results = spawn_agents_parallel(tasks, max_workers=10, on_complete=on_complete)
+    ui.agent_progress_complete(f"Summarized {len(tasks)} outputs")
 
-    failed = [tid for tid, r in results.items() if not r.success]
+    failed = [tid for tid, r in summary_results.items() if not r.success]
     if failed:
         ui.warning(f"Failed to summarize: {failed}")
 
@@ -422,8 +456,11 @@ def _gather_all_summaries(report_dir: Path) -> list[str]:
 
     summaries = []
     for f in sorted(summaries_dir.glob("*_summary.md")):
-        content = f.read_text()
-        summaries.append(f"### {f.stem}\n{content}")
+        try:
+            content = f.read_text()
+            summaries.append(f"### {f.stem}\n{content}")
+        except (OSError, IOError) as e:
+            ui.warning(f"Failed to read summary {f.name}: {e}")
 
     return summaries
 

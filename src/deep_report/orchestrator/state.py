@@ -6,7 +6,8 @@ Provides persistent, auto-saving state that survives crashes and enables resumpt
 
 import fcntl
 import json
-import time
+import os
+import tempfile
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional, Any
@@ -180,7 +181,7 @@ class State:
     _state_file: str = field(default="", repr=False)
 
     def save(self):
-        """Persist state to disk with file locking."""
+        """Persist state to disk with atomic write and file locking."""
         if not self._state_file:
             return
 
@@ -192,25 +193,53 @@ class State:
         del data["_state_file"]
         data["updated_at"] = datetime.now().isoformat()
 
+        def json_default(obj):
+            """Handle non-serializable types."""
+            if hasattr(obj, '__dict__'):
+                return obj.__dict__
+            return str(obj)
+
         try:
-            with open(self._state_file, 'w') as f:
-                try:
+            # Write to temp file first, then atomic rename
+            fd, tmp_path = tempfile.mkstemp(
+                dir=state_path.parent,
+                prefix=".state_",
+                suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, 'w') as f:
                     fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                    f.write(json.dumps(data, indent=2))
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    try:
+                        f.write(json.dumps(data, indent=2, default=json_default))
+                        f.flush()
+                        os.fsync(f.fileno())
+                    finally:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                os.rename(tmp_path, self._state_file)
+            except Exception:
+                # Clean up temp file on error
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except OSError as e:
             print(f"Warning: Failed to save state: {e}")
 
     @classmethod
     def load(cls, state_file: Path) -> "State":
-        """Load state from disk, or create new if doesn't exist."""
+        """Load state from disk with file locking, or create new if doesn't exist."""
         state = cls()
         state._state_file = str(state_file)
 
         if state_file.exists():
             try:
-                data = json.loads(state_file.read_text())
+                with open(state_file, 'r') as f:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                    try:
+                        data = json.load(f)
+                    finally:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
                 # Validate and sanitize data
                 validated_data, warnings = validate_state_data(data)
@@ -220,8 +249,11 @@ class State:
                 for key, value in validated_data.items():
                     if hasattr(state, key) and key != "_state_file":
                         setattr(state, key, value)
-            except (json.JSONDecodeError, KeyError) as e:
+            except json.JSONDecodeError as e:
                 print(f"Warning: Could not load state: {e}")
+            except KeyError as e:
+                print(f"Warning: Missing key in state: {e}")
+                raise
         else:
             state.created_at = datetime.now().isoformat()
             state.save()
@@ -264,8 +296,8 @@ class State:
                     step=self.current_step,
                     complete=(phase >= 5)
                 )
-            except Exception:
-                pass  # Registry update is non-critical
+            except Exception as e:
+                print(f"Warning: Registry update failed: {e}")
 
     def checkpoint(self, step: str):
         """Create a checkpoint at the current step."""

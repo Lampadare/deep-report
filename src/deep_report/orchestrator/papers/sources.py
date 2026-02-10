@@ -58,9 +58,15 @@ class BaseSource:
         if not HAS_REQUESTS:
             return None
 
+        # Add User-Agent header to avoid blocks
+        headers = kwargs.pop('headers', {})
+        if 'User-Agent' not in headers:
+            headers['User-Agent'] = 'deep-report/1.0 (Academic Research Tool)'
+
         for attempt in range(max_retries):
+            resp = None
             try:
-                resp = requests.get(url, timeout=self.timeout, **kwargs)
+                resp = requests.get(url, timeout=self.timeout, headers=headers, **kwargs)
                 if resp.status_code == 200:
                     return resp
                 if resp.status_code == 429:  # Rate limit
@@ -74,6 +80,13 @@ class BaseSource:
                 time.sleep(2 * (attempt + 1))
             except requests.exceptions.RequestException:
                 return None
+            finally:
+                # Ensure response is closed properly
+                if resp is not None and resp.status_code != 200:
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
         return None
 
 
@@ -194,6 +207,16 @@ class OpenAccessSource(BaseSource):
         'springeropen.com': 'SpringerOpen',
     }
 
+    def _is_allowed_domain(self, url: str) -> bool:
+        """Check if PDF URL is from an allowed domain."""
+        try:
+            parsed = urlparse(url)
+            domain = parsed.netloc.lower()
+            # Allow subdomains of known publishers
+            return any(d in domain for d in self.DOMAINS.keys())
+        except Exception:
+            return False
+
     def can_handle(self, url: str) -> bool:
         return any(d in url.lower() for d in self.DOMAINS)
 
@@ -229,14 +252,27 @@ class OpenAccessSource(BaseSource):
             if not pdf_url.startswith('http'):
                 pdf_url = urljoin(url, pdf_url)
 
+            # Validate PDF URL is from expected domain
+            if not self._is_allowed_domain(pdf_url):
+                return PaperResult(False, error="PDF URL from untrusted domain", source=self.name)
+
+            # Validate urljoin result
+            if not pdf_url.startswith('http'):
+                return PaperResult(False, error="Invalid PDF URL after join", source=self.name)
+
             # Download PDF
             pdf_resp = self._get_with_retry(pdf_url, allow_redirects=True)
             if pdf_resp is None or pdf_resp.status_code != 200:
                 return PaperResult(False, error="PDF download failed", source=self.name)
 
+            # Validate final URL after following redirects (SSRF protection)
+            if hasattr(pdf_resp, 'url') and not self._is_allowed_domain(pdf_resp.url):
+                return PaperResult(False, error="PDF redirect to untrusted domain", source=self.name)
+
             # Generate filename from URL
+            from urllib.parse import unquote
             parsed = urlparse(pdf_url)
-            filename = Path(parsed.path).name
+            filename = unquote(Path(parsed.path).name)
             if not filename or filename == 'pdf':
                 # Generate from article URL
                 filename = self._safe_filename(Path(urlparse(url).path).stem) + '.pdf'
@@ -262,6 +298,26 @@ class DOISource(BaseSource):
 
     name = "doi"
     PATTERN = re.compile(r'(?:doi\.org/|doi:\s*)(10\.\d{4,}/[^\s]+)')
+
+    # Allowlist of known academic publisher domains
+    ALLOWED_DOMAINS = {
+        'arxiv.org', 'doi.org', 'ncbi.nlm.nih.gov', 'biorxiv.org', 'medrxiv.org',
+        'frontiersin.org', 'elifesciences.org', 'plos.org', 'plosone.org',
+        'mdpi.com', 'nature.com', 'biomedcentral.com', 'springeropen.com',
+        'springer.com', 'wiley.com', 'elsevier.com', 'sciencedirect.com',
+        'ieee.org', 'acm.org', 'aaai.org', 'neurips.cc', 'mlr.press',
+        'openreview.net', 'cell.com', 'thelancet.com', 'nejm.org',
+        'acs.org', 'rsc.org', 'iop.org', 'aps.org',
+    }
+
+    def _is_allowed_domain(self, url: str) -> bool:
+        """Check if URL is from an allowed academic domain."""
+        try:
+            parsed = urlparse(url)
+            domain = parsed.netloc.lower()
+            return any(allowed in domain for allowed in self.ALLOWED_DOMAINS)
+        except Exception:
+            return False
 
     def can_handle(self, url: str) -> bool:
         return 'doi.org/' in url or 'doi:' in url.lower()
@@ -303,7 +359,14 @@ class DOISource(BaseSource):
                     if not pdf_url.startswith('http'):
                         pdf_url = urljoin(final_url, pdf_url)
 
+                    # Validate URL and domain
+                    if not pdf_url.startswith('http') or not self._is_allowed_domain(pdf_url):
+                        continue
+
                     pdf_resp = self._get_with_retry(pdf_url, allow_redirects=True)
+                    # Validate final URL after redirects (SSRF protection)
+                    if pdf_resp and hasattr(pdf_resp, 'url') and not self._is_allowed_domain(pdf_resp.url):
+                        continue
                     if pdf_resp and pdf_resp.status_code == 200 and len(pdf_resp.content) > 1000:
                         safe_doi = self._safe_filename(doi)
                         output_path = output_dir / f"doi_{safe_doi}.pdf"
@@ -340,6 +403,9 @@ class BiorxivSource(BaseSource):
             if '/content/' in url:
                 # Construct PDF URL by appending .full.pdf
                 pdf_url = url.rstrip('/') + '.full.pdf'
+                # Validate the constructed URL
+                if not pdf_url.startswith('http'):
+                    return PaperResult(False, error="Invalid PDF URL", source=self.name)
             else:
                 return PaperResult(False, error="Could not parse biorxiv ID", source=self.name)
         else:

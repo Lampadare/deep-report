@@ -53,8 +53,12 @@ def _calculate_metrics(state: State, report_dir: Path) -> dict:
     # Count words in report
     report_file = report_dir / "report.md"
     if report_file.exists():
-        content = report_file.read_text()
-        metrics["report_word_count"] = len(content.split())
+        try:
+            content = report_file.read_text()
+            metrics["report_word_count"] = len(content.split())
+        except (OSError, IOError) as e:
+            ui.warning(f"Failed to read report for metrics: {e}")
+            metrics["report_word_count"] = 0
     else:
         metrics["report_word_count"] = 0
 
@@ -91,7 +95,11 @@ def _calculate_metrics(state: State, report_dir: Path) -> dict:
     audio_file = report_dir / "report_audio.md"
     metrics["audio_generated"] = audio_file.exists()
     if audio_file.exists():
-        metrics["audio_word_count"] = len(audio_file.read_text().split())
+        try:
+            metrics["audio_word_count"] = len(audio_file.read_text().split())
+        except (OSError, IOError) as e:
+            ui.warning(f"Failed to read audio file for metrics: {e}")
+            metrics["audio_word_count"] = 0
 
     # Cost (estimated based on activity)
     metrics["estimated_cost"] = state.estimated_cost
@@ -157,7 +165,10 @@ def _write_summary(state: State, metrics: dict, summary_file: Path):
             status = "✓" if fu.get("status") == "completed" else "✗"
             lines.append(f"- [{status}] **{fu.get('id')}** ({fu.get('reason')}): {fu.get('focus')}")
 
-    summary_file.write_text("\n".join(lines))
+    try:
+        summary_file.write_text("\n".join(lines))
+    except (OSError, PermissionError) as e:
+        ui.warning(f"Failed to write summary file: {e}")
 
 
 def _finalize_manifest(state: State, metrics: dict):
@@ -165,9 +176,13 @@ def _finalize_manifest(state: State, metrics: dict):
 
     manifest_file = Path(state.report_dir) / "state" / "manifest.json"
 
-    if manifest_file.exists():
-        manifest = json.loads(manifest_file.read_text())
-    else:
+    try:
+        if manifest_file.exists():
+            manifest = json.loads(manifest_file.read_text())
+        else:
+            manifest = {}
+    except (OSError, IOError, json.JSONDecodeError) as e:
+        ui.warning(f"Failed to read manifest: {e}")
         manifest = {}
 
     manifest.update({
@@ -185,7 +200,10 @@ def _finalize_manifest(state: State, metrics: dict):
         "estimated_cost": metrics["estimated_cost"],
     })
 
-    manifest_file.write_text(json.dumps(manifest, indent=2))
+    try:
+        manifest_file.write_text(json.dumps(manifest, indent=2))
+    except (OSError, PermissionError) as e:
+        ui.warning(f"Failed to write manifest: {e}")
 
     # Also save final state
     state.save()

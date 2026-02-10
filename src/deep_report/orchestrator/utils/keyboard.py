@@ -23,6 +23,7 @@ class KeyboardListener:
         self._available = False
 
         # Check if we can use raw terminal mode via /dev/tty
+        self._use_stdin = False
         try:
             import tty
             import termios
@@ -42,8 +43,6 @@ class KeyboardListener:
         except ImportError:
             pass
 
-        self._use_stdin = getattr(self, '_use_stdin', False)
-
     @property
     def available(self) -> bool:
         """Check if keyboard listening is available."""
@@ -61,7 +60,8 @@ class KeyboardListener:
     def stop(self):
         """Stop the keyboard listener."""
         self._running = False
-        if self._thread:
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
             self._thread = None
 
     def _listen(self):
@@ -99,10 +99,19 @@ class KeyboardListener:
                             self.on_key(ch)
                         except Exception:
                             pass  # Don't crash on callback errors
+        except Exception:
+            pass  # Handle edge cases during cleanup
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            # Restore terminal state with error handling
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            except Exception:
+                pass
             if should_close:
-                input_file.close()
+                try:
+                    input_file.close()
+                except Exception:
+                    pass
 
 
 class VerboseToggle:

@@ -2,6 +2,7 @@
 """Phase 4: Synthesize - Multi-pass synthesis for report generation."""
 
 import json
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -120,10 +121,11 @@ Guidelines:
 CRITICAL: You MUST call Write tool with file_path="{report_file}" to save the report.
 """
 
-    result = spawn_agent(
-        prompt, model="opus", output_file=report_file, timeout_secs=2700,
-        allowed_tools=AGENT_TOOLS["synthesis"]
-    )
+    with ui.spinner_task("Synthesis agent working (this may take a while)..."):
+        result = spawn_agent(
+            prompt, model="opus", output_file=report_file, timeout_secs=2700,
+            allowed_tools=AGENT_TOOLS["synthesis"]
+        )
 
     if result.success and report_file.exists():
         word_count = RoleEnforcer.count_words_streaming(report_file)
@@ -187,8 +189,11 @@ def _cluster_threads(state: State, summaries_dir: Path) -> list[dict]:
     thread_summaries = []
     for f in sorted(summaries_dir.glob("*_summary.md")):
         thread_id = f.stem.replace("_summary", "")
-        content = f.read_text()[:500]
-        thread_summaries.append(f"{thread_id}: {content}")
+        try:
+            content = f.read_text()[:500]
+            thread_summaries.append(f"{thread_id}: {content}")
+        except (OSError, IOError) as e:
+            ui.warning(f"Failed to read summary {f.name}: {e}")
 
     num_clusters = min(5, max(2, len(thread_summaries) // 4))
 
@@ -218,10 +223,11 @@ Return a JSON object (ONLY valid JSON):
 Group related threads together. Every thread must be assigned to exactly one cluster.
 """
 
-    result = spawn_agent(
-        prompt, model="sonnet", timeout_secs=360,
-        allowed_tools=AGENT_TOOLS["decision"]  # Read-only, output via stdout
-    )
+    with ui.spinner_task("Clustering research threads..."):
+        result = spawn_agent(
+            prompt, model="sonnet", timeout_secs=360,
+            allowed_tools=AGENT_TOOLS["decision"]  # Read-only, output via stdout
+        )
 
     if result.success:
         data = extract_json(result.output)
@@ -312,8 +318,21 @@ CRITICAL: You MUST call Write tool with file_path="{output_file}" to save the se
             "allowed_tools": AGENT_TOOLS["synthesis"],
         })
 
+    # Progress tracking for synthesis
+    ui.agent_progress_start(len(tasks), "Synthesizing sections")
+    completed_count = [0]
+    completed_lock = threading.Lock()
+
+    def on_complete(task_id: str, result):
+        with completed_lock:
+            completed_count[0] += 1
+            current = completed_count[0]
+        status = "✓" if result.success else "✗"
+        ui.agent_progress_update(current, f"{task_id}: {status}")
+
     # Run in parallel
-    results = spawn_agents_parallel(tasks, max_workers=5)
+    results = spawn_agents_parallel(tasks, max_workers=5, on_complete=on_complete)
+    ui.agent_progress_complete(f"Synthesized {len(clusters)} sections")
 
     synthesis_results = []
     for cluster in clusters:
@@ -368,10 +387,11 @@ STEPS:
 CRITICAL: You MUST call Write tool with file_path="{header_file}" to save the header.
 """
 
-    result = spawn_agent(
-        prompt, model="opus", output_file=header_file, timeout_secs=900,
-        allowed_tools=AGENT_TOOLS["synthesis"]
-    )
+    with ui.spinner_task("Writing report header..."):
+        result = spawn_agent(
+            prompt, model="opus", output_file=header_file, timeout_secs=900,
+            allowed_tools=AGENT_TOOLS["synthesis"]
+        )
 
     if not result.success:
         ui.warning(f"Header generation failed: {result.error}")
@@ -417,10 +437,11 @@ STEPS:
 CRITICAL: You MUST call Write tool with file_path="{conclusion_file}" to save the conclusion.
 """
 
-    result = spawn_agent(
-        prompt, model="opus", output_file=conclusion_file, timeout_secs=900,
-        allowed_tools=AGENT_TOOLS["synthesis"]
-    )
+    with ui.spinner_task("Writing conclusion..."):
+        result = spawn_agent(
+            prompt, model="opus", output_file=conclusion_file, timeout_secs=900,
+            allowed_tools=AGENT_TOOLS["synthesis"]
+        )
 
     if not result.success:
         ui.warning(f"Conclusion generation failed: {result.error}")
@@ -440,20 +461,35 @@ def _assemble_report(report_file: Path, header_file: Path, parts: list[dict], co
 
     # Header
     if header_file.exists():
-        sections.append(header_file.read_text())
+        try:
+            sections.append(header_file.read_text())
+        except (OSError, IOError) as e:
+            ui.warning(f"Failed to read header file: {e}")
 
     # Main sections
     for p in sorted(parts, key=lambda x: x["cluster_id"]):
         part_file = Path(p["file"])
         if part_file.exists():
-            content = part_file.read_text()
-            sections.append(f"\n\n---\n\n# {p['title']}\n\n{content}")
+            try:
+                content = part_file.read_text()
+                sections.append(f"\n\n---\n\n# {p['title']}\n\n{content}")
+            except (OSError, IOError) as e:
+                ui.warning(f"Failed to read part file {part_file.name}: {e}")
+        else:
+            ui.warning(f"Missing synthesis part: {part_file.name}")
 
     # Conclusion
     if conclusion_file.exists():
-        sections.append(f"\n\n---\n\n{conclusion_file.read_text()}")
+        try:
+            sections.append(f"\n\n---\n\n{conclusion_file.read_text()}")
+        except (OSError, IOError) as e:
+            ui.warning(f"Failed to read conclusion file: {e}")
 
-    report_file.write_text("\n".join(sections))
+    try:
+        report_file.write_text("\n".join(sections))
+    except (OSError, PermissionError) as e:
+        ui.error(f"Failed to write final report: {e}")
+        raise
 
 
 def _compile_references(state: State, report_dir: Path):
@@ -491,10 +527,11 @@ STEPS:
 CRITICAL: You MUST call Write tool with file_path="{refs_file}" to save the references.
 """
 
-    spawn_agent(
-        prompt, model="sonnet", output_file=refs_file, timeout_secs=900,
-        allowed_tools=AGENT_TOOLS["synthesis"]
-    )
+    with ui.spinner_task("Compiling references..."):
+        spawn_agent(
+            prompt, model="sonnet", output_file=refs_file, timeout_secs=900,
+            allowed_tools=AGENT_TOOLS["synthesis"]
+        )
 
 
 def _generate_audio(state: State, report_dir: Path):
@@ -507,7 +544,11 @@ def _generate_audio(state: State, report_dir: Path):
         return
 
     # Check report size
-    report_content = report_file.read_text()
+    try:
+        report_content = report_file.read_text()
+    except (OSError, IOError) as e:
+        ui.warning(f"Failed to read report for audio conversion: {e}")
+        return
     word_count = len(report_content.split())
 
     if word_count > 20000:
@@ -539,10 +580,11 @@ STEPS:
 CRITICAL: You MUST call Write tool with file_path="{audio_file}" to save the audio version.
 """
 
-    spawn_agent(
-        prompt, model="opus", output_file=audio_file, timeout_secs=1800,
-        allowed_tools=AGENT_TOOLS["synthesis"]
-    )
+    with ui.spinner_task("Converting to audio format..."):
+        spawn_agent(
+            prompt, model="opus", output_file=audio_file, timeout_secs=1800,
+            allowed_tools=AGENT_TOOLS["synthesis"]
+        )
 
 
 def _generate_audio_multi(state: State, report_dir: Path, report_content: str):
@@ -591,16 +633,28 @@ CRITICAL: You MUST call Write tool with file_path="{part_file}" to save.
     if not tasks:
         return
 
+    # Progress tracking for audio generation
+    ui.agent_progress_start(len(tasks), "Converting sections to audio")
+    completed_count = [0]
+    completed_lock = threading.Lock()
+
     def on_complete(task_id: str, result):
+        with completed_lock:
+            completed_count[0] += 1
+            current = completed_count[0]
         status = "✓" if result.success else "✗"
+        ui.agent_progress_update(current, f"{task_id}: {status}")
         ui.verbose(f"Audio {task_id}: {status}")
 
     results = spawn_agents_parallel(tasks, max_workers=5, on_complete=on_complete)
+    ui.agent_progress_complete(f"Converted {len(tasks)} sections to audio")
 
     # Combine parts in order
     audio_parts = []
+    temp_files = []
     for i in range(len(sections)):
         part_file = report_dir / "state" / f"audio_part_{i}.md"
+        temp_files.append(part_file)
         if part_file.exists():
             try:
                 audio_parts.append(part_file.read_text())
@@ -609,6 +663,14 @@ CRITICAL: You MUST call Write tool with file_path="{part_file}" to save.
 
     if audio_parts:
         audio_file.write_text("\n\n---\n\n".join(audio_parts))
+
+    # Clean up temporary audio part files
+    for temp_file in temp_files:
+        try:
+            if temp_file.exists():
+                temp_file.unlink()
+        except OSError:
+            pass  # Best effort cleanup
 
 
 def _download_papers(state: State, report_dir: Path):

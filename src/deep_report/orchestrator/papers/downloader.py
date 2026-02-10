@@ -30,7 +30,10 @@ class PaperDownloader:
             output_dir: Directory to save downloaded PDFs
             max_workers: Maximum concurrent downloads
         """
-        self.output_dir = Path(output_dir)
+        self.output_dir = Path(output_dir).resolve()
+        # Validate output directory path
+        if not self.output_dir.parent.exists():
+            raise ValueError(f"Parent directory does not exist: {self.output_dir.parent}")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.max_workers = max_workers
 
@@ -59,10 +62,10 @@ class PaperDownloader:
         Returns:
             List of unique URLs
         """
-        # Match various URL patterns
+        # Improved regex patterns to avoid trailing artifacts
         patterns = [
-            r'https?://[^\s\)\]<>\"]+',
-            r'doi\.org/10\.\d{4,}/[^\s\)\]<>\"]+',
+            r'https?://[^\s\)\]<>\"]+(?=[\s\)\]<>\"\.,;:]|$)',
+            r'doi\.org/10\.\d{4,}/[^\s\)\]<>\"]+(?=[\s\)\]<>\"\.,;:]|$)',
         ]
 
         urls = []
@@ -74,10 +77,8 @@ class PaperDownloader:
         cleaned = []
         seen = set()
         for url in urls:
-            # Remove trailing punctuation
-            url = url.rstrip('.,;:)\'"')
-            # Remove markdown formatting artifacts
-            url = re.sub(r'\)$', '', url)
+            # Remove trailing punctuation more precisely
+            url = re.sub(r'[.,;:)\'\"\]]+$', '', url)
 
             # Skip duplicates
             if url.lower() in seen:

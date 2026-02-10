@@ -30,16 +30,42 @@ AGENT_TOOLS = {
     "decision": ["Read"],  # Read-only, output via stdout
 }
 
+# Allowed model names
+ALLOWED_MODELS = ["sonnet", "opus", "haiku"]
+
 
 def _extract_json(text: str) -> dict | None:
-    """Extract first JSON object from text."""
+    """Extract first complete JSON object from text using brace matching."""
     start = text.find("{")
-    end = text.rfind("}") + 1
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start:end])
-        except json.JSONDecodeError:
-            return None
+    if start < 0:
+        return None
+
+    # Use brace counting to find matching close brace
+    depth = 0
+    in_string = False
+    escape_next = False
+
+    for i, char in enumerate(text[start:], start):
+        if escape_next:
+            escape_next = False
+            continue
+        if char == '\\' and in_string:
+            escape_next = True
+            continue
+        if char == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == '{':
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i+1])
+                except json.JSONDecodeError:
+                    return None
     return None
 
 
@@ -58,13 +84,18 @@ class CircuitBreaker:
         self.is_open = False
         self._lock = threading.Lock()
 
-    def record_failure(self):
-        """Record a failure. Opens circuit if threshold exceeded."""
+    def record_failure(self) -> bool:
+        """Record a failure. Opens circuit if threshold exceeded.
+
+        Returns:
+            True if circuit is now open, False otherwise
+        """
         with self._lock:
             self.failure_count += 1
             self.last_failure_time = time.time()
             if self.failure_count >= self.failure_threshold:
                 self.is_open = True
+            return self.is_open
 
     def record_success(self):
         """Record a success. Resets failure count."""
@@ -109,10 +140,12 @@ class CircuitBreaker:
             print(f"  Circuit breaker open, waiting {remaining:.0f}s...")
             time.sleep(remaining)
 
-        # Re-acquire lock to reset state
+        # Re-acquire lock and re-check state before resetting
         with self._lock:
-            self.is_open = False
-            self.failure_count = 0
+            # Only reset if still open (another thread may have reset it)
+            if self.is_open:
+                self.is_open = False
+                self.failure_count = 0
         return True
 
 
@@ -155,7 +188,7 @@ def spawn_agent(
 
     Args:
         prompt: The prompt to send to Claude
-        model: Model to use (sonnet, opus)
+        model: Model to use (sonnet, opus, haiku)
         output_file: If provided, agent will write output here
         timeout_secs: Maximum time to wait
         cwd: Working directory for the agent
@@ -166,6 +199,15 @@ def spawn_agent(
     """
     start = time.time()
 
+    # Validate model parameter
+    if model not in ALLOWED_MODELS:
+        return AgentResult(
+            success=False,
+            output="",
+            error=f"Invalid model '{model}'. Allowed: {ALLOWED_MODELS}",
+            duration_secs=0.0
+        )
+
     # Build the command
     cmd = ["claude", "--print", "--model", model]
 
@@ -173,24 +215,44 @@ def spawn_agent(
     if allowed_tools:
         cmd.extend(["--allowedTools", ",".join(allowed_tools)])
 
+    process = None
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             cmd,
-            input=prompt,
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_secs,
             cwd=cwd or os.getcwd(),
+            start_new_session=True,  # Create new process group for clean termination
         )
+
+        try:
+            stdout, stderr = process.communicate(input=prompt, timeout=timeout_secs)
+        except subprocess.TimeoutExpired:
+            # Kill the entire process group to ensure all children are terminated
+            import signal
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                # Fallback if process group kill fails
+                process.kill()
+            process.wait()
+            return AgentResult(
+                success=False,
+                output="",
+                error=f"Agent timed out after {timeout_secs}s",
+                duration_secs=timeout_secs
+            )
 
         duration = time.time() - start
 
-        if result.returncode == 0:
+        if process.returncode == 0:
             # Check if output file was created
             if output_file and output_file.exists():
                 return AgentResult(
                     success=True,
-                    output=result.stdout,
+                    output=stdout,
                     duration_secs=duration,
                     output_file=str(output_file)
                 )
@@ -198,38 +260,37 @@ def spawn_agent(
                 # Agent didn't write the file - mark as failure
                 # Include stderr and last part of stdout for debugging
                 debug_info = ""
-                if result.stderr:
-                    debug_info = f" stderr: {result.stderr[:200]}"
-                elif result.stdout:
-                    debug_info = f" (agent output: {result.stdout[-300:][:150]}...)"
+                if stderr:
+                    debug_info = f" stderr: {stderr[:200]}"
+                elif stdout:
+                    debug_info = f" (agent output: {stdout[-300:][:150]}...)"
                 return AgentResult(
                     success=False,
-                    output=result.stdout,
+                    output=stdout,
                     duration_secs=duration,
                     error=f"Output file not created by agent{debug_info}"
                 )
             else:
                 return AgentResult(
                     success=True,
-                    output=result.stdout,
+                    output=stdout,
                     duration_secs=duration
                 )
         else:
             return AgentResult(
                 success=False,
-                output=result.stdout,
-                error=result.stderr,
+                output=stdout,
+                error=stderr,
                 duration_secs=duration
             )
 
-    except subprocess.TimeoutExpired:
-        return AgentResult(
-            success=False,
-            output="",
-            error=f"Agent timed out after {timeout_secs}s",
-            duration_secs=timeout_secs
-        )
     except Exception as e:
+        if process is not None:
+            try:
+                process.kill()
+                process.wait()
+            except Exception:
+                pass
         return AgentResult(
             success=False,
             output="",
@@ -329,8 +390,10 @@ def spawn_agents_parallel(
         futures = {}
 
         for task in tasks:
-            # Check circuit breaker before submitting
+            # Check circuit breaker before submitting (atomic check right before submit)
             cb.wait_if_needed()
+            if not cb.should_proceed():
+                continue
 
             # Use retry wrapper for reliability
             future = pool.submit(
@@ -356,8 +419,8 @@ def spawn_agents_parallel(
             if result.success:
                 cb.record_success()
             else:
-                cb.record_failure()
-                if cb.is_open:
+                is_open = cb.record_failure()
+                if is_open:
                     print(f"  Circuit breaker opened after {cb.failure_threshold} consecutive failures")
 
             results[task_id] = result

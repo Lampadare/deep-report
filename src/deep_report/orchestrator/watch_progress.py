@@ -142,25 +142,28 @@ def watch_jsonl(report_dir: Path, follow: bool = True, raw: bool = False):
             return
 
     # Read existing content
-    with open(watch_file) as f:
-        for line in f:
-            line = line.rstrip()
-            if not line:
-                continue
+    try:
+        with open(watch_file) as f:
+            for line in f:
+                line = line.rstrip()
+                if not line:
+                    continue
 
-            if use_jsonl:
-                try:
-                    event = json.loads(line)
-                    if raw:
+                if use_jsonl:
+                    try:
+                        event = json.loads(line)
+                        if raw:
+                            print(line)
+                        else:
+                            print(format_event(event))
+                    except json.JSONDecodeError:
                         print(line)
-                    else:
-                        print(format_event(event))
-                except json.JSONDecodeError:
+                else:
                     print(line)
-            else:
-                print(line)
 
-        last_pos = f.tell()
+            last_pos = f.tell()
+    except FileNotFoundError:
+        last_pos = 0
 
     if not follow:
         return
@@ -169,26 +172,34 @@ def watch_jsonl(report_dir: Path, follow: bool = True, raw: bool = False):
     print("\n--- Following (Ctrl+C to stop) ---\n")
     try:
         while True:
-            with open(watch_file) as f:
-                f.seek(last_pos)
-                for line in f:
-                    line = line.rstrip()
-                    if not line:
-                        continue
+            try:
+                with open(watch_file) as f:
+                    f.seek(last_pos)
+                    for line in f:
+                        line = line.rstrip()
+                        if not line:
+                            continue
 
-                    if use_jsonl:
-                        try:
-                            event = json.loads(line)
-                            if raw:
+                        if use_jsonl:
+                            try:
+                                event = json.loads(line)
+                                if raw:
+                                    print(line)
+                                else:
+                                    print(format_event(event))
+                            except json.JSONDecodeError:
                                 print(line)
-                            else:
-                                print(format_event(event))
-                        except json.JSONDecodeError:
+                        else:
                             print(line)
-                    else:
-                        print(line)
 
-                last_pos = f.tell()
+                    last_pos = f.tell()
+            except FileNotFoundError:
+                # File was deleted, wait and retry
+                time.sleep(1)
+                continue
+            except Exception:
+                # Handle other file errors
+                pass
             time.sleep(0.3)
     except KeyboardInterrupt:
         print("\n\nStopped watching.")

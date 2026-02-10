@@ -140,11 +140,20 @@ def run_setup(state: State, args: dict) -> bool:
     # Determine report directory using new logic
     report_dir = _determine_output_dir(args)
 
-    # Validate resolved path doesn't escape parent (defense in depth)
+    # Validate resolved path is absolute and within allowed parents
     resolved = report_dir.resolve()
-    parent = resolved.parent
-    if not str(resolved).startswith(str(parent)):
-        ui.error("Invalid report directory path")
+    allowed_parents = [Path.home(), Path(args.get("cwd") or os.getcwd()).resolve()]
+
+    def _is_path_under(child: Path, parent: Path) -> bool:
+        """Check if child path is under parent using relative_to (not prefix matching)."""
+        try:
+            child.resolve().relative_to(parent.resolve())
+            return True
+        except ValueError:
+            return False
+
+    if not any(_is_path_under(resolved, p) for p in allowed_parents):
+        ui.error("Report directory must be within home or current working directory")
         return False
 
     state.report_dir = str(report_dir)
@@ -177,7 +186,11 @@ def run_setup(state: State, args: dict) -> bool:
 
     # Create directory structure
     ui.step(f"Creating report directory: {report_dir}")
-    _create_directories(report_dir)
+    try:
+        _create_directories(report_dir)
+    except (OSError, PermissionError) as e:
+        ui.error(f"Failed to create directories: {e}")
+        return False
     state.checkpoint("directories_created")
 
     # Register in central registry
@@ -188,7 +201,11 @@ def run_setup(state: State, args: dict) -> bool:
         pass  # Registry is non-critical
 
     # Write initial manifest
-    _write_manifest(state)
+    try:
+        _write_manifest(state)
+    except (OSError, PermissionError) as e:
+        ui.error(f"Failed to write manifest: {e}")
+        return False
     state.checkpoint("manifest_written")
 
     # Process seeds if provided
@@ -252,7 +269,11 @@ def _create_directories(report_dir: Path):
 
 
 def _write_manifest(state: State):
-    """Write the manifest.json file."""
+    """Write the manifest.json file.
+
+    Raises:
+        OSError: If file cannot be written
+    """
     manifest = {
         "topic": state.topic,
         "created_at": state.created_at,
@@ -499,8 +520,11 @@ def _write_scope(state: State):
     summaries_dir = report_dir / "summaries" / "seeds"
     if summaries_dir.exists():
         for f in summaries_dir.glob("*.md"):
-            content = f.read_text()[:2000]  # Limit per seed
-            seed_context += f"\n### {f.stem}\n{content}\n"
+            try:
+                content = f.read_text()[:2000]  # Limit per seed
+                seed_context += f"\n### {f.stem}\n{content}\n"
+            except (OSError, IOError) as e:
+                ui.warning(f"Failed to read seed summary {f.name}: {e}")
 
     # Use brief if available (detailed research instructions), otherwise topic
     research_instructions = state.brief or state.topic

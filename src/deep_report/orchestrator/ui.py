@@ -15,12 +15,14 @@ try:
     from rich.panel import Panel
     from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
     from rich.table import Table
+    from rich.box import ROUNDED
     from rich.live import Live
     from rich.text import Text
     from rich.spinner import Spinner
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
+    ROUNDED = None
 
 
 # Phase colors and icons for visual distinction
@@ -50,6 +52,18 @@ class DeepReportUI:
         self._live = None
         self._task_id = None
         self._verbose = False
+        # Plain mode progress tracking
+        self._plain_total = 0
+        self._plain_completed = 0
+        # Research table state
+        self._threads = []
+        self._thread_status = {}
+        self._thread_times = {}
+        self._research_title = ""
+        self._research_live = None
+        # Thread safety for _thread_status
+        import threading
+        self._status_lock = threading.Lock()
 
     def set_verbose(self, enabled: bool):
         """Enable or disable verbose mode."""
@@ -242,18 +256,24 @@ class DeepReportUI:
     def agent_progress_start(self, total: int, description: str = "Spawning agents"):
         """Start agent progress tracking with enhanced visuals."""
         if RICH_AVAILABLE:
-            self._progress = Progress(
-                SpinnerColumn("dots", style="cyan"),
-                TextColumn("[bold blue]{task.description}[/]"),
-                BarColumn(complete_style="green", finished_style="bold green"),
-                TaskProgressColumn(),
-                TextColumn("[dim cyan]{task.fields[status]}[/]"),
-                console=self.console,
-                transient=False,
-            )
-            self._live = Live(self._progress, console=self.console, refresh_per_second=4)
-            self._live.start()
-            self._task_id = self._progress.add_task(description, total=total, status="starting...")
+            try:
+                self._progress = Progress(
+                    SpinnerColumn("dots", style="cyan"),
+                    TextColumn("[bold blue]{task.description}[/]"),
+                    BarColumn(complete_style="green", finished_style="bold green"),
+                    TaskProgressColumn(),
+                    TextColumn("[dim cyan]{task.fields[status]}[/]"),
+                    console=self.console,
+                    transient=False,
+                )
+                self._live = Live(self._progress, console=self.console, refresh_per_second=4)
+                self._live.start()
+                self._task_id = self._progress.add_task(description, total=total, status="starting...")
+            except Exception:
+                # Fallback to plain mode on error
+                print(f"{description} (0/{total})...")
+                self._plain_total = total
+                self._plain_completed = 0
         else:
             print(f"{description} (0/{total})...")
             self._plain_total = total
@@ -271,11 +291,149 @@ class DeepReportUI:
     def agent_progress_complete(self, message: str = "Complete"):
         """Complete agent progress tracking."""
         if RICH_AVAILABLE and self._live:
-            self._live.stop()
-            self._progress = None
-            self._live = None
-            self._task_id = None
+            try:
+                self._live.stop()
+            except Exception:
+                pass
+            finally:
+                self._progress = None
+                self._live = None
+                self._task_id = None
         self.success(message)
+
+    @contextmanager
+    def spinner_task(self, message: str):
+        """Show spinner during a single long task."""
+        if RICH_AVAILABLE:
+            with self.console.status(f"[cyan]{message}[/]", spinner="dots"):
+                yield
+        else:
+            print(f"  {message}...")
+            yield
+
+    def research_table_start(self, threads: list[dict], title: str = "RESEARCH AGENTS"):
+        """Start live research thread table.
+
+        Args:
+            threads: List of {"id": "thread_1", "title": "Short description"}
+            title: Table title
+        """
+        self._threads = threads
+        self._thread_status = {t["id"]: "pending" for t in threads}
+        self._thread_times = {}
+        self._research_title = title
+
+        if not RICH_AVAILABLE:
+            print(f"\n{title}")
+            return
+
+        try:
+            self._research_live = Live(
+                self._build_research_table(),
+                console=self.console,
+                refresh_per_second=4
+            )
+            self._research_live.start()
+        except Exception:
+            # Fallback to plain mode on error
+            print(f"\n{title}")
+
+    def _build_research_table(self):
+        """Build the research status table."""
+        table = Table(show_header=True, box=ROUNDED)
+        table.add_column("#", width=4, justify="right")
+        table.add_column("Thread", width=32)
+        table.add_column("Status", width=20)
+
+        for i, thread in enumerate(self._threads, 1):
+            tid = thread["id"]
+            title = thread.get("title", tid)[:30]
+            status = self._thread_status.get(tid, "pending")
+
+            if status == "pending":
+                status_text = "[dim]○ Pending[/]"
+            elif status == "running":
+                status_text = "[cyan]⠋ Running...[/]"
+            elif status == "complete":
+                time_str = f" ({self._thread_times.get(tid, 0):.0f}s)" if tid in self._thread_times else ""
+                status_text = f"[green]✓ Complete{time_str}[/]"
+            elif status == "failed":
+                status_text = "[red]✗ Failed[/]"
+            else:
+                status_text = f"[dim]{status}[/]"
+
+            table.add_row(str(i), title, status_text)
+
+        complete = sum(1 for s in self._thread_status.values() if s == "complete")
+        failed = sum(1 for s in self._thread_status.values() if s == "failed")
+        total = len(self._threads)
+
+        summary = f"Progress: {complete}/{total} complete"
+        if failed:
+            summary += f" | [red]{failed} failed[/]"
+
+        return Panel(table, title=f"[bold]🔬 {self._research_title}[/]",
+                     subtitle=summary, border_style="blue")
+
+    def research_table_update(self, thread_id: str, status: str, duration: float = 0):
+        """Update a thread's status."""
+        new_table = None
+        with self._status_lock:
+            self._thread_status[thread_id] = status
+            if duration:
+                self._thread_times[thread_id] = duration
+            # Build table while holding lock to ensure consistent snapshot
+            if RICH_AVAILABLE and self._research_live:
+                try:
+                    new_table = self._build_research_table()
+                except Exception:
+                    pass
+
+        # Update display outside lock to avoid blocking other threads
+        if new_table is not None:
+            try:
+                self._research_live.update(new_table)
+            except Exception:
+                pass
+        elif not RICH_AVAILABLE:
+            symbol = "✓" if status == "complete" else "✗" if status == "failed" else "⠋"
+            print(f"  [{symbol}] {thread_id}: {status}")
+
+    def research_table_mark_next_running(self):
+        """Mark the next pending thread as running (thread-safe)."""
+        with self._status_lock:
+            for tid, s in self._thread_status.items():
+                if s == "pending":
+                    self._thread_status[tid] = "running"
+                    break
+            else:
+                return  # No pending threads
+
+        if RICH_AVAILABLE and self._research_live:
+            try:
+                self._research_live.update(self._build_research_table())
+            except Exception:
+                pass
+
+    def research_table_complete(self):
+        """Finalize and close the live table."""
+        if RICH_AVAILABLE and self._research_live:
+            try:
+                self._research_live.stop()
+            except Exception:
+                pass
+            finally:
+                self._research_live = None
+
+        with self._status_lock:
+            complete = sum(1 for s in self._thread_status.values() if s == "complete")
+            failed = sum(1 for s in self._thread_status.values() if s == "failed")
+            total = len(self._thread_status)
+
+        if failed:
+            self.warning(f"Research: {complete}/{total} succeeded, {failed} failed")
+        else:
+            self.success(f"Research: {complete}/{total} succeeded")
 
     def decision(self, iteration: int, sufficient: bool, reasoning: str):
         """Display decision agent result."""
@@ -497,9 +655,10 @@ class DeepReportUI:
 
 def _format_time_ago(dt) -> str:
     """Format datetime as '2 hours ago' style string."""
-    from datetime import datetime
+    from datetime import datetime, timezone
 
-    now = datetime.now()
+    # Use timezone-aware datetime for consistency
+    now = datetime.now(timezone.utc) if dt.tzinfo else datetime.now()
     diff = now - dt
     seconds = diff.total_seconds()
 
