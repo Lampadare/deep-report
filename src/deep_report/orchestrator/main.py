@@ -1269,8 +1269,14 @@ def resume_report(report_dir: Path, ctx: OrchestratorContext) -> int:
         "phase_5_complete": "Cleanup",
     }
     current_phase = state.current_phase
-    target_phase = current_phase + 1
-    step_display = _step_display_names.get(state.current_step, state.current_step)
+    step = state.current_step
+    # If the current step indicates the phase completed, resume at the next phase.
+    # Otherwise the phase was interrupted mid-flight — resume AT it.
+    if step.endswith("_complete") and step.startswith("phase_"):
+        target_phase = current_phase + 1
+    else:
+        target_phase = current_phase
+    step_display = _step_display_names.get(step, step)
 
     # Detailed resume recap (defensive for legacy state files)
     completed = getattr(state, 'completed_threads', [])
