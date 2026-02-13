@@ -5,6 +5,7 @@ Handles structural failures that require user action (permissions, rate limits, 
 """
 
 import json
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -24,10 +25,14 @@ from .ui import ui
 class InterventionHandler:
     """Handles async user intervention for structural failures."""
 
-    def __init__(self, report_dir: Path, progress: Optional[ProgressWriter] = None):
+    _io_lock = threading.Lock()
+
+    def __init__(self, report_dir: Path, progress: Optional[ProgressWriter] = None,
+                 interactive: bool = True):
         self.report_dir = Path(report_dir)
         self.intervention_file = self.report_dir / "state" / "intervention_needed.json"
         self.progress = progress
+        self.interactive = interactive
 
     def request_intervention(self, issue: str, details: dict,
                             suggested_fix: str = "") -> bool:
@@ -42,6 +47,10 @@ class InterventionHandler:
             True if user fixed and wants to retry
             False if user wants to skip/quit
         """
+        if not self.interactive:
+            ui.warning(f"Non-interactive mode — skipping intervention: {issue}")
+            return False
+
         request = {
             "issue": issue,
             "details": details,
@@ -49,81 +58,84 @@ class InterventionHandler:
             "requested_at": datetime.now().isoformat(),
             "status": "pending",
         }
-        self.intervention_file.parent.mkdir(parents=True, exist_ok=True)
-        self.intervention_file.write_text(json.dumps(request, indent=2))
+        try:
+            self.intervention_file.parent.mkdir(parents=True, exist_ok=True)
+            self.intervention_file.write_text(json.dumps(request, indent=2))
+        except Exception as e:
+            ui.warning(f"Intervention state saving failed: {e}")
 
         if self.progress:
             self.progress.intervention_needed(issue)
 
-        while True:
-            if RICH_AVAILABLE:
-                console = Console()
-                console.print()
+        with self._io_lock:
+            while True:
+                if RICH_AVAILABLE:
+                    console = Console()
+                    console.print()
 
-                # Build details table
-                table = Table(show_header=False, box=None, padding=(0, 2))
-                table.add_column("Key", style="dim cyan")
-                table.add_column("Value", style="white")
+                    # Build details table
+                    table = Table(show_header=False, box=None, padding=(0, 2))
+                    table.add_column("Key", style="dim cyan")
+                    table.add_column("Value", style="white")
 
-                table.add_row("Issue", f"[bold red]{issue}[/]")
-                for key, value in details.items():
-                    key_display = key.replace("_", " ").title()
-                    table.add_row(key_display, str(value))
+                    table.add_row("Issue", f"[bold red]{issue}[/]")
+                    for key, value in details.items():
+                        key_display = key.replace("_", " ").title()
+                        table.add_row(key_display, str(value))
 
-                if suggested_fix:
-                    table.add_row("Suggested Fix", f"[green]{suggested_fix}[/]")
+                    if suggested_fix:
+                        table.add_row("Suggested Fix", f"[green]{suggested_fix}[/]")
 
-                table.add_row("Intervention File", f"[dim]{self.intervention_file}[/]")
+                    table.add_row("Intervention File", f"[dim]{self.intervention_file}[/]")
 
-                console.print(Panel(
-                    table,
-                    title="[bold red]⚠ INTERVENTION REQUIRED[/]",
-                    border_style="red",
-                    padding=(1, 2)
-                ))
+                    console.print(Panel(
+                        table,
+                        title="[bold red]⚠ INTERVENTION REQUIRED[/]",
+                        border_style="red",
+                        padding=(1, 2)
+                    ))
 
-                console.print()
-                console.print("[bold]Options:[/]")
-                console.print("  [green]r[/] / [green]Enter[/]  Retry after fixing the issue")
-                console.print("  [yellow]s[/]          Skip this task and continue")
-                console.print("  [red]q[/]          Quit orchestrator")
-                console.print()
+                    console.print()
+                    console.print("  [green]Enter[/]  Retry after fixing the issue")
+                    console.print("  [yellow]s[/]      Skip this task and continue")
+                    console.print("  [red]q[/]      Quit (progress saved, resume later)")
+                    console.print()
 
-                try:
-                    response = console.input("[bold]Action?[/] (r): ").strip().lower()
-                except EOFError:
-                    console.print("\n[yellow]No input available, defaulting to skip[/]")
-                    response = 's'
-            else:
-                print(f"\n{'!'*60}")
-                print(f"INTERVENTION REQUIRED")
-                print(f"{'!'*60}")
-                print(f"\nIssue: {issue}")
-                print(f"\nDetails:")
-                for key, value in details.items():
-                    print(f"  {key}: {value}")
+                    try:
+                        response = console.input("[bold]Action?[/] [Enter/s/q]: ").strip().lower()
+                    except EOFError:
+                        ui.warning("No interactive input available — rejecting for safety")
+                        response = 'q'
+                else:
+                    print(f"\n{'!'*60}")
+                    print(f"INTERVENTION REQUIRED")
+                    print(f"{'!'*60}")
+                    print(f"\nIssue: {issue}")
+                    print(f"\nDetails:")
+                    for key, value in details.items():
+                        print(f"  {key}: {value}")
 
-                if suggested_fix:
-                    print(f"\nSuggested fix: {suggested_fix}")
+                    if suggested_fix:
+                        print(f"\nSuggested fix: {suggested_fix}")
 
-                print(f"\nIntervention file: {self.intervention_file}")
-                print(f"\n{'!'*60}")
-                print("\nOptions:")
-                print("  [r/Enter] Retry after fixing the issue")
-                print("  [s]       Skip this task and continue")
-                print("  [q]       Quit orchestrator")
-                print()
+                    print(f"\nIntervention file: {self.intervention_file}")
+                    print(f"\n{'!'*60}")
+                    print("\nOptions:")
+                    print("  [Enter]  Retry after fixing the issue")
+                    print("  [s]      Skip this task and continue")
+                    print("  [q]      Quit (progress saved, resume later)")
+                    print()
 
-                try:
-                    response = input("Action? [r/s/q]: ").strip().lower()
-                except EOFError:
-                    print("\nNo input available, defaulting to skip")
-                    response = 's'
+                    try:
+                        response = input("Action? [Enter/s/q]: ").strip().lower()
+                    except EOFError:
+                        ui.warning("No interactive input available — rejecting for safety")
+                        response = 'q'
 
-            # Validate input before acting
-            if response in ('q', 's', 'r', ''):
-                break
-            ui.warning(f"Unrecognized input '{response}'. Options: r (retry), s (skip), q (quit)")
+                # Validate input before acting
+                if response in ('q', 's', ''):
+                    break
+                ui.warning(f"Unrecognized input '{response}'. Options: Enter (retry), s (skip), q (quit, progress saved)")
 
         # KeyboardInterrupt is used for quit to halt execution cleanly
         if response == 'q':
@@ -139,7 +151,7 @@ class InterventionHandler:
             self.intervention_file.write_text(json.dumps(request, indent=2))
             return False
 
-        # User wants to retry (r or Enter)
+        # User wants to retry (Enter)
         # Remove file on retry to signal completion
         self.intervention_file.unlink(missing_ok=True)
         return True

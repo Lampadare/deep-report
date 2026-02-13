@@ -7,7 +7,7 @@ from datetime import datetime
 
 from ..state import State
 from ..utils import RoleEnforcer
-from ..ui import ui
+from ..ui import ui, format_duration
 
 
 def run_cleanup(state: State) -> bool:
@@ -60,7 +60,7 @@ def _calculate_metrics(state: State, report_dir: Path) -> dict:
                     word_count += len(line.split())
             metrics["report_word_count"] = word_count
         except (OSError, IOError) as e:
-            ui.warning(f"Failed to read report for metrics: {e}")
+            ui.warning(f"Report metrics reading failed: {e}")
             metrics["report_word_count"] = 0
     else:
         metrics["report_word_count"] = 0
@@ -101,7 +101,7 @@ def _calculate_metrics(state: State, report_dir: Path) -> dict:
         try:
             metrics["audio_word_count"] = len(audio_file.read_text().split())
         except (OSError, IOError) as e:
-            ui.warning(f"Failed to read audio file for metrics: {e}")
+            ui.warning(f"Audio metrics reading failed: {e}")
             metrics["audio_word_count"] = 0
 
     # Cost (estimated based on activity)
@@ -171,7 +171,7 @@ def _write_summary(state: State, metrics: dict, summary_file: Path):
     try:
         summary_file.write_text("\n".join(lines))
     except (OSError, PermissionError) as e:
-        ui.warning(f"Failed to write summary file: {e}")
+        ui.warning(f"Summary writing failed: {e}")
 
 
 def _finalize_manifest(state: State, metrics: dict):
@@ -185,7 +185,7 @@ def _finalize_manifest(state: State, metrics: dict):
         else:
             manifest = {}
     except (OSError, IOError, json.JSONDecodeError) as e:
-        ui.warning(f"Failed to read manifest: {e}")
+        ui.warning(f"Manifest reading failed: {e}")
         manifest = {}
 
     manifest.update({
@@ -206,7 +206,7 @@ def _finalize_manifest(state: State, metrics: dict):
     try:
         manifest_file.write_text(json.dumps(manifest, indent=2))
     except (OSError, PermissionError) as e:
-        ui.warning(f"Failed to write manifest: {e}")
+        ui.warning(f"Manifest writing failed: {e}")
 
     # Also save final state
     state.save()
@@ -222,23 +222,23 @@ def _print_summary(state: State, metrics: dict, report_dir: Path):
             start = datetime.fromisoformat(state.created_at)
             end = datetime.fromisoformat(metrics['completed_at'])
             elapsed_secs = (end - start).total_seconds()
-            if elapsed_secs >= 3600:
-                hours = int(elapsed_secs // 3600)
-                mins = int((elapsed_secs % 3600) // 60)
-                elapsed_str = f"{hours}h {mins}m"
-            elif elapsed_secs >= 60:
-                elapsed_str = f"{int(elapsed_secs // 60)}m {int(elapsed_secs % 60)}s"
-            else:
-                elapsed_str = f"{int(elapsed_secs)}s"
+            elapsed_str = format_duration(elapsed_secs)
         except (ValueError, TypeError):
             pass
+
+    # Build cost display: show both estimated and actual if actual is available
+    total_cost = state.total_cost
+    if total_cost > 0:
+        cost_str = f"Estimated: ${metrics['estimated_cost']:.2f} | Actual: ~${total_cost:.2f}"
+    else:
+        cost_str = f"${metrics['estimated_cost']:.2f}"
 
     stats = {
         "Report": f"{metrics['report_word_count']:,} words",
         "Raw research": f"{metrics['raw_research_words']:,} words",
         "Agents": f"{metrics['agents_completed']}/{metrics['agents_planned']} completed",
         "Iterations": metrics['research_iterations'],
-        "Estimated cost": f"${metrics['estimated_cost']:.2f}",
+        "Cost": cost_str,
     }
 
     if elapsed_str:
@@ -249,5 +249,7 @@ def _print_summary(state: State, metrics: dict, report_dir: Path):
 
     if metrics["papers_downloaded"] > 0:
         stats["Papers"] = f"{metrics['papers_downloaded']} PDFs"
+
+    stats["Agent outputs"] = f"{report_dir}/full/agents/"
 
     ui.final_summary(str(report_dir), stats)

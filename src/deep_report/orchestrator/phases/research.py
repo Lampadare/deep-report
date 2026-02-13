@@ -25,6 +25,7 @@ def run_research(
     state: State,
     approval: Optional[ApprovalGate] = None,
     progress: Optional[ProgressWriter] = None,
+    intervention_handler: Optional[object] = None,
 ) -> bool:
     """Run the research phase with iterative deepening.
 
@@ -85,7 +86,8 @@ def run_research(
             progress.update(3, f"Spawning agents", f"{len(threads_to_run)} agents")
 
         results = _run_research_batch(
-            state, threads_to_run, scope_content, seed_context, iteration, progress
+            state, threads_to_run, scope_content, seed_context, iteration, progress,
+            intervention_handler=intervention_handler,
         )
 
         # Update state with completed/failed
@@ -158,6 +160,21 @@ def run_research(
 
             # APPROVAL GATE: Before each follow-up iteration
             if approval:
+                # Estimate additional cost for proposed follow-up threads
+                followup_count = (
+                    len(decision.get("gaps", []))
+                    + len(decision.get("conflicts", []))
+                    + len(decision.get("deepen", []))
+                )
+                # Rough estimate: per-agent cost based on avg duration so far
+                if state.completed_threads:
+                    avg_cost = state.total_cost / len(state.completed_threads)
+                else:
+                    avg_cost = 0.50  # fallback estimate
+                estimated_additional = avg_cost * followup_count
+                decision["estimated_additional_cost"] = f"~${estimated_additional:.2f} ({followup_count} threads)"
+                ui.info(f"Estimated additional cost: ~${estimated_additional:.2f} for {followup_count} follow-up threads (running total: ${state.total_cost:.2f})")
+
                 if not approval.iteration_gate(state, decision, iteration):
                     ui.info("User stopped iterations, proceeding to synthesis")
                     break
@@ -211,6 +228,7 @@ def _run_research_batch(
     seed_context: str,
     iteration: int,
     progress: Optional[ProgressWriter] = None,
+    intervention_handler: Optional[object] = None,
 ) -> dict[str, AgentResult]:
     """Run a batch of research agents in parallel."""
 
@@ -267,6 +285,7 @@ def _run_research_batch(
 
     # Progress callback with thread-safe counter and incremental state saves
     completed = [0]
+    running_cost = [state.total_cost]  # Resume from prior iterations' accumulated cost
     total = len(tasks)
     state_lock = threading.Lock()
 
@@ -275,22 +294,30 @@ def _run_research_batch(
             completed[0] += 1
             current = completed[0]
 
+            # Accumulate cost estimate
+            running_cost[0] += result.estimated_cost
+            state.total_cost = running_cost[0]
+
             # Incremental state save — survives Ctrl+C
             if result.success:
                 if task_id not in state.completed_threads:
                     state.completed_threads.append(task_id)
-                if not task_id.startswith("followup_"):
+                if task_id.startswith("followup_"):
+                    _mark_followup_complete(state, task_id, result)
+                else:
                     state.update_thread(task_id, status="completed", output_file=result.output_file)
             else:
-                if not task_id.startswith("followup_"):
-                    if task_id not in state.failed_threads:
-                        state.failed_threads.append(task_id)
+                if task_id not in state.failed_threads:
+                    state.failed_threads.append(task_id)
+                if task_id.startswith("followup_"):
+                    _mark_followup_failed(state, task_id, result.error)
+                else:
                     state.update_thread(task_id, status="failed")
-            state.save()
 
-        # Update table status
+        # Update table status and running cost
         status = "complete" if result.success else "failed"
         ui.research_table_update(task_id, status, result.duration_secs)
+        ui.research_table_update_cost(running_cost[0])
 
         # Mark next pending thread as running (thread-safe via UI method)
         ui.research_table_mark_next_running()
@@ -309,8 +336,23 @@ def _run_research_batch(
                 result.duration_secs, result.retries
             )
 
-    results = spawn_agents_parallel(tasks, max_workers=max_workers, on_complete=on_complete)
+    results = spawn_agents_parallel(tasks, max_workers=max_workers, on_complete=on_complete,
+                                     intervention_handler=intervention_handler)
     ui.research_table_complete()
+
+    # #14: Print failure summary
+    failed_results = {tid: r for tid, r in results.items() if not r.success}
+    if failed_results:
+        ui.warning("Failed agents:")
+        for tid, r in failed_results.items():
+            err_line = r.error.split("\n")[0][:120] if r.error else "Unknown error"
+            ui.dim(f"  {tid}: {err_line}")
+
+    # #30: Summarization transition message
+    completed_count = sum(1 for r in results.values() if r.success)
+    if completed_count > 0:
+        ui.info(f"All {completed_count} agents finished. Summarizing outputs for evaluation...")
+
     return results
 
 
@@ -545,20 +587,22 @@ def _create_followups(state: State, decision: dict, iteration: int):
 
 
 def _mark_followup_complete(state: State, followup_id: str, result: AgentResult):
-    """Mark a followup as completed."""
-    for fu in state.followups:
-        if fu.get("id") == followup_id:
-            fu["status"] = "completed"
-            fu["output_file"] = result.output_file
-            state.save()
-            return
+    """Mark a followup as completed. Thread-safe via state._save_lock."""
+    with state._save_lock:
+        for fu in state.followups:
+            if fu.get("id") == followup_id:
+                fu["status"] = "completed"
+                fu["output_file"] = result.output_file
+                state.save()
+                return
 
 
 def _mark_followup_failed(state: State, followup_id: str, error: str):
-    """Mark a followup as failed."""
-    for fu in state.followups:
-        if fu.get("id") == followup_id:
-            fu["status"] = "failed"
-            fu["error"] = error
-            state.save()
-            return
+    """Mark a followup as failed. Thread-safe via state._save_lock."""
+    with state._save_lock:
+        for fu in state.followups:
+            if fu.get("id") == followup_id:
+                fu["status"] = "failed"
+                fu["error"] = error
+                state.save()
+                return

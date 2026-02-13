@@ -42,12 +42,26 @@ class Theme:
 theme = Theme()
 
 
+def format_duration(seconds: float) -> str:
+    """Format seconds into human-readable duration string."""
+    import math
+    if not math.isfinite(seconds):
+        return "??"
+    seconds = max(0, seconds)
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+    else:
+        return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m"
+
+
 SPINNER_CHARS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 PHASE_ICONS = {
     1: "🔧",  # Setup
-    2: "📋",  # Plan
+    2: "📋",  # Planning
     3: "🔬",  # Research
-    4: "📝",  # Synthesize
+    4: "📝",  # Synthesis
     5: "✅",  # Cleanup
 }
 
@@ -96,6 +110,10 @@ class DeepReportUI:
         self._session_start_time = None
         # ETA tracking
         self._agent_durations = []
+        # Research table timing
+        self._research_start_time = None
+        # Running cost display
+        self._table_cost = None
 
     def set_verbose(self, enabled: bool):
         """Enable or disable verbose mode."""
@@ -232,11 +250,7 @@ class DeepReportUI:
         """Announce phase completion."""
         elapsed = ""
         if self._phase_start_time:
-            secs = time.time() - self._phase_start_time
-            if secs >= 60:
-                elapsed = f" ({int(secs // 60)}m {int(secs % 60)}s)"
-            else:
-                elapsed = f" ({int(secs)}s)"
+            elapsed = f" ({format_duration(time.time() - self._phase_start_time)})"
 
         if RICH_AVAILABLE:
             self.console.rule(style=theme.dim)
@@ -249,7 +263,7 @@ class DeepReportUI:
 
     def phase_bar(self, completed_phase: int, total: int = 5):
         """Show persistent phase progress bar."""
-        PHASE_NAMES = ["Setup", "Plan", "Research", "Synthesize", "Cleanup"]
+        PHASE_NAMES = ["Setup", "Planning", "Research", "Synthesis", "Cleanup"]
 
         if RICH_AVAILABLE:
             parts = []
@@ -327,11 +341,12 @@ class DeepReportUI:
             ))
         else:
             print()
-            print("!!!! INTERVENTION REQUIRED !!!!")
+            print("=" * 60)
+            print("INTERVENTION REQUIRED")
             print(issue)
             for k, v in details.items():
                 print(f"  {k}: {v}")
-            print()
+            print("=" * 60)
 
     def config_summary(self, config: dict):
         """Display configuration summary as a table."""
@@ -429,6 +444,7 @@ class DeepReportUI:
         self._thread_status = {t["id"]: "pending" for t in threads}
         self._thread_times = {}
         self._research_title = title
+        self._research_start_time = time.monotonic()
 
         if not RICH_AVAILABLE:
             print(f"\n{title}")
@@ -467,7 +483,7 @@ class DeepReportUI:
                 elif status == "running":
                     status_text = f"[{theme.accent}]{char} Running...[/]"
                 elif status == "complete":
-                    time_str = f" ({self._thread_times.get(tid, 0):.0f}s)" if tid in self._thread_times else ""
+                    time_str = f" ({format_duration(self._thread_times.get(tid, 0))})" if tid in self._thread_times else ""
                     status_text = f"[{theme.success}]✓ Complete{time_str}[/]"
                 elif status == "failed":
                     status_text = f"[{theme.error}]✗ Failed[/]"
@@ -483,24 +499,35 @@ class DeepReportUI:
             pct = int(complete / total * 100) if total else 0
             durations_snapshot = list(self._agent_durations)
             research_title = self._research_title
+            research_start = self._research_start_time
+            table_cost = self._table_cost
 
-        summary = f"Progress: {complete}/{total} ({pct}%)"
+        # Elapsed time
+        parts = []
+        if research_start is not None:
+            elapsed_secs = time.monotonic() - research_start
+            parts.append(f"Elapsed: {format_duration(elapsed_secs)}")
 
-        # ETA from rolling average
-        if durations_snapshot and complete < total:
+        parts.append(f"Progress: {complete}/{total} ({pct}%)")
+
+        # ETA from rolling average (only after 3+ agents complete)
+        if len(durations_snapshot) >= 3 and complete < total:
             avg = sum(durations_snapshot) / len(durations_snapshot)
             remaining = total - complete - failed
             parallel = max(running, 1)
             eta_secs = (remaining / parallel) * avg
-            if eta_secs >= 60:
-                summary += f" | ETA: ~{int(eta_secs // 60)}m {int(eta_secs % 60)}s"
-            else:
-                summary += f" | ETA: ~{int(eta_secs)}s"
+            parts.append(f"ETA: ~{format_duration(eta_secs)}")
 
         if failed:
-            summary += f" | [{theme.error}]✗ {failed} failed[/]"
+            parts.append(f"[{theme.error}]✗ {failed} failed[/]")
 
-        summary += f" | [{theme.dim}]Ctrl+C twice to quit[/]"
+        if table_cost is not None:
+            parts.append(f"Cost: ${table_cost:.2f}")
+
+        parts.append(f"[{theme.dim}]Press 'v' for details[/]")
+        parts.append(f"[{theme.dim}]Ctrl+C x2 within 3s to quit[/]")
+
+        summary = " | ".join(parts)
 
         return Panel(table, title=f"[bold]🔬 {research_title}[/]",
                      subtitle=summary, border_style=theme.border)
@@ -509,9 +536,9 @@ class DeepReportUI:
         """Update a thread's status."""
         with self._status_lock:
             self._thread_status[thread_id] = status
-            if duration:
+            if duration is not None and duration >= 0:
                 self._thread_times[thread_id] = duration
-            if status == "complete" and duration:
+            if status == "complete" and duration is not None:
                 self._agent_durations.append(duration)
 
         # Live auto-refreshes via _SpinnerTable, but force an update for immediate feedback
@@ -534,6 +561,11 @@ class DeepReportUI:
             else:
                 return
 
+    def research_table_update_cost(self, cost: float):
+        """Update the running cost displayed in the research table subtitle."""
+        with self._status_lock:
+            self._table_cost = cost
+
     def cleanup_thread_metadata(self):
         """Clear thread metadata to free memory after a research phase."""
         with self._status_lock:
@@ -543,6 +575,8 @@ class DeepReportUI:
             self._research_title = ""
             self._spinner_frame = 0
             self._agent_durations = []
+            self._research_start_time = None
+            self._table_cost = None
 
     def research_table_complete(self):
         """Finalize and close the live table. Safe to call multiple times."""
@@ -589,12 +623,18 @@ class DeepReportUI:
     def decision(self, iteration: int, sufficient: bool, reasoning: str):
         """Display decision agent result."""
         if RICH_AVAILABLE:
-            status = f"[bold {theme.success}]SUFFICIENT[/]" if sufficient else f"[bold {theme.warning}]NEEDS MORE[/]"
-            self.console.print(f"\n[bold]Decision (iteration {iteration}):[/] {status}")
+            if sufficient:
+                status = f"[bold {theme.success}]Complete[/] — enough material for your report"
+            else:
+                status = f"[bold {theme.warning}]More research needed[/] — follow-up round proposed"
+            self.console.print(f"\n[bold]Research coverage check:[/] {status}")
             self.console.print(f"  [{theme.dim}]{reasoning}[/]")
         else:
-            status = "SUFFICIENT" if sufficient else "NEEDS MORE"
-            print(f"\nDecision (iteration {iteration}): {status}")
+            if sufficient:
+                status = "Complete — enough material for your report"
+            else:
+                status = "More research needed — follow-up round proposed"
+            print(f"\nResearch coverage check: {status}")
             print(f"  {reasoning}")
 
     def plan_summary(self, threads: list[dict]):
@@ -629,13 +669,7 @@ class DeepReportUI:
         """Display final report summary."""
         elapsed = ""
         if self._session_start_time:
-            secs = time.time() - self._session_start_time
-            if secs >= 3600:
-                elapsed = f"{int(secs // 3600)}h {int((secs % 3600) // 60)}m"
-            elif secs >= 60:
-                elapsed = f"{int(secs // 60)}m {int(secs % 60)}s"
-            else:
-                elapsed = f"{int(secs)}s"
+            elapsed = format_duration(time.time() - self._session_start_time)
 
         if RICH_AVAILABLE:
             self.console.print()

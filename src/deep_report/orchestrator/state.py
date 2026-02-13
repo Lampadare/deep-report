@@ -36,7 +36,7 @@ if HAS_PYDANTIC:
         seed_refs_folder: Optional[str] = None
         seed_urls: list[str] = Field(default_factory=list)
         expertise_level: str = "intermediate"
-        report_type: str = "state-of-the-art"
+        report_type: str = "deep-dive"
         current_phase: int = Field(default=0, ge=0, le=5)
         current_step: str = ""
         seeds_processed: bool = False
@@ -142,7 +142,7 @@ class State:
     seed_refs_folder: Optional[str] = None
     seed_urls: list[str] = field(default_factory=list)
     expertise_level: str = "intermediate"
-    report_type: str = "state-of-the-art"
+    report_type: str = "deep-dive"
 
     # Phase tracking
     current_phase: int = 0

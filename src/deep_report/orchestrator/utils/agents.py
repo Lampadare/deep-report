@@ -11,8 +11,11 @@ import os
 import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional, Callable
+from typing import Optional, Callable, TYPE_CHECKING
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    from ..intervention import InterventionHandler
 
 from ..ui import ui
 
@@ -223,6 +226,15 @@ class AgentResult:
     duration_secs: float = 0.0
     output_file: Optional[str] = None
     retries: int = 0
+    estimated_cost: float = 0.0
+
+
+# Rough cost-per-second estimates by model (based on typical token throughput)
+_COST_PER_SEC = {
+    "opus": 0.02,
+    "sonnet": 0.004,
+    "haiku": 0.001,
+}
 
 
 def _is_structural_error(error: str) -> bool:
@@ -318,7 +330,8 @@ def spawn_agent(
                 success=False,
                 output="",
                 error=f"Agent timed out after {timeout_secs}s",
-                duration_secs=timeout_secs
+                duration_secs=timeout_secs,
+                estimated_cost=_COST_PER_SEC.get(model, 0.004) * timeout_secs,
             )
         finally:
             process_tracker.unregister(process.pid)
@@ -326,13 +339,16 @@ def spawn_agent(
         duration = time.time() - start
 
         if process.returncode == 0:
+            cost = _COST_PER_SEC.get(model, 0.004) * duration
+
             # Check if output file was created
             if output_file and output_file.exists():
                 return AgentResult(
                     success=True,
                     output=stdout,
                     duration_secs=duration,
-                    output_file=str(output_file)
+                    output_file=str(output_file),
+                    estimated_cost=cost,
                 )
             elif output_file:
                 # Agent didn't write the file - mark as failure
@@ -346,20 +362,23 @@ def spawn_agent(
                     success=False,
                     output=stdout,
                     duration_secs=duration,
-                    error=f"Output file not created by agent{debug_info}"
+                    error=f"Output file not created by agent{debug_info}",
+                    estimated_cost=cost,
                 )
             else:
                 return AgentResult(
                     success=True,
                     output=stdout,
-                    duration_secs=duration
+                    duration_secs=duration,
+                    estimated_cost=cost,
                 )
         else:
             return AgentResult(
                 success=False,
                 output=stdout,
                 error=stderr,
-                duration_secs=duration
+                duration_secs=duration,
+                estimated_cost=_COST_PER_SEC.get(model, 0.004) * duration,
             )
 
     except Exception as e:
@@ -370,11 +389,13 @@ def spawn_agent(
             except Exception:
                 pass
             process_tracker.unregister(process.pid)
+        elapsed = time.time() - start
         return AgentResult(
             success=False,
             output="",
             error=str(e),
-            duration_secs=time.time() - start
+            duration_secs=elapsed,
+            estimated_cost=_COST_PER_SEC.get(model, 0.004) * elapsed,
         )
 
 
@@ -387,6 +408,8 @@ def spawn_agent_with_retry(
     max_retries: int = 3,
     backoff_base: float = 30.0,
     allowed_tools: Optional[list[str]] = None,
+    task_label: Optional[str] = None,
+    intervention_handler: "Optional[InterventionHandler]" = None,
 ) -> AgentResult:
     """Spawn agent with exponential backoff retry.
 
@@ -399,12 +422,17 @@ def spawn_agent_with_retry(
         max_retries: Maximum retry attempts
         backoff_base: Base wait time for exponential backoff
         allowed_tools: If provided, restrict agent to these tools only
+        task_label: Optional label for retry log messages
+        intervention_handler: Optional InterventionHandler for interactive mode.
+            When provided and a structural error occurs, the user is prompted
+            to retry/skip/quit instead of silently returning failure.
 
     Returns:
         AgentResult with success status, output, and retry count
     """
     last_error = None
     total_duration = 0.0
+    label = task_label or "agent"
 
     for attempt in range(max_retries):
         # Bail immediately if shutdown is in progress
@@ -431,11 +459,20 @@ def spawn_agent_with_retry(
 
         last_error = result.error
 
-        # Don't retry if shutting down or error is structural
+        # Don't retry if shutting down
         if process_tracker.is_shutting_down:
             result.retries = attempt
             return result
+
+        # Structural errors: ask user if handler provided, otherwise return failure
         if _is_structural_error(result.error):
+            if intervention_handler is not None:
+                # Returns True to retry, False to skip; raises KeyboardInterrupt to quit
+                should_retry = intervention_handler.categorize_and_handle(
+                    result.error, {"task": label}
+                )
+                if should_retry:
+                    continue  # retry from top of loop
             result.retries = attempt
             return result
 
@@ -443,7 +480,8 @@ def spawn_agent_with_retry(
         if attempt < max_retries - 1:
             wait_time = backoff_base * (2 ** attempt)
             err_msg = str(result.error)[:100] + ("..." if len(str(result.error)) > 100 else "")
-            ui.verbose(f"Retry {attempt+1}/{max_retries} in {wait_time:.0f}s... (error: {err_msg})")
+            ui.info(f"Retrying {label} in {wait_time:.0f}s... (attempt {attempt+1}/{max_retries})")
+            ui.verbose(f"  Error: {err_msg}")
             # Sleep in 1s intervals so we can check shutdown flag
             for _ in range(int(wait_time)):
                 if process_tracker.is_shutting_down:
@@ -468,6 +506,7 @@ def spawn_agents_parallel(
     max_workers: int = 5,
     on_complete: Optional[Callable] = None,
     circuit_breaker: Optional[CircuitBreaker] = None,
+    intervention_handler: "Optional[InterventionHandler]" = None,
 ) -> dict[str, AgentResult]:
     """Spawn multiple agents in parallel.
 
@@ -476,6 +515,7 @@ def spawn_agents_parallel(
         max_workers: Maximum concurrent agents
         on_complete: Callback(task_id, result) called after each completion
         circuit_breaker: Optional circuit breaker to pause on repeated failures
+        intervention_handler: Optional InterventionHandler for interactive mode
 
     Returns:
         Dict mapping task_id to AgentResult
@@ -507,6 +547,8 @@ def spawn_agents_parallel(
                     cwd=Path(task["cwd"]) if task.get("cwd") else None,
                     max_retries=task.get("max_retries", 3),
                     allowed_tools=task.get("allowed_tools"),
+                    task_label=task.get("id", ""),
+                    intervention_handler=intervention_handler,
                 )
             except RuntimeError:
                 # Pool is shutting down
@@ -584,8 +626,15 @@ Be conservative - only request more research if genuinely needed.
     )
 
     if not result.success:
-        ui.warning("Decision agent failed, continuing research as fallback")
-        return {"sufficient": True, "reasoning": "Decision agent failed", "gaps": [], "conflicts": [], "deepen": []}
+        if iteration < max_iterations:
+            ui.warning("Decision agent failed — continuing research as a precaution")
+            return {
+                "sufficient": False,
+                "reasoning": "Decision agent failed — defaulting to continue research",
+                "gaps": [], "conflicts": [], "deepen": [],
+            }
+        ui.warning("Decision agent failed on final iteration, marking sufficient")
+        return {"sufficient": True, "reasoning": "Decision agent failed on final iteration", "gaps": [], "conflicts": [], "deepen": []}
 
     # Parse JSON from output
     parsed = _extract_json(result.output)
@@ -593,7 +642,14 @@ Be conservative - only request more research if genuinely needed.
         return parsed
 
     # Default if parsing fails
-    ui.warning("Decision agent output could not be parsed, continuing research as fallback")
-    return {"sufficient": True, "reasoning": "Could not parse decision", "gaps": [], "conflicts": [], "deepen": []}
+    if iteration < max_iterations - 1:
+        ui.warning("Decision agent output could not be parsed — continuing research as a precaution")
+        return {
+            "sufficient": False,
+            "reasoning": "Could not parse decision output — defaulting to continue research",
+            "gaps": [], "conflicts": [], "deepen": [],
+        }
+    ui.warning("Decision agent output could not be parsed on final iteration, marking sufficient")
+    return {"sufficient": True, "reasoning": "Could not parse decision on final iteration", "gaps": [], "conflicts": [], "deepen": []}
 
 

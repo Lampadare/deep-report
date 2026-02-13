@@ -21,23 +21,55 @@ from datetime import datetime
 
 
 def find_latest_report() -> Path:
-    """Find the most recently modified report directory."""
-    reports_dir = Path.home() / "reports"
-    if not reports_dir.exists():
-        print(f"No reports directory found at {reports_dir}")
-        sys.exit(1)
+    """Find the most recently modified report directory.
 
-    # Find directories with state/progress.log or state/manifest.json
+    Searches in order:
+    1. DEEP_REPORT_DIR env var (if set)
+    2. ~/Documents/deep-reports/
+    3. Current working directory
+    """
+    search_dirs = []
+
+    # Check env var first
+    env_dir = os.environ.get("DEEP_REPORT_DIR")
+    if env_dir:
+        search_dirs.append(Path(env_dir))
+
+    # Default location
+    search_dirs.append(Path.home() / "Documents" / "deep-reports")
+
+    # Current working directory
+    search_dirs.append(Path.cwd())
+
     candidates = []
-    for d in reports_dir.iterdir():
-        if d.is_dir():
-            state_dir = d / "state"
-            if state_dir.exists():
+    for reports_dir in search_dirs:
+        if not reports_dir.exists():
+            continue
+        # Check if this dir itself is a report
+        state_dir = reports_dir / "state"
+        if state_dir.exists():
+            try:
                 mtime = state_dir.stat().st_mtime
-                candidates.append((mtime, d))
+                candidates.append((mtime, reports_dir))
+            except OSError:
+                pass
+        # Check subdirectories
+        try:
+            for d in reports_dir.iterdir():
+                if d.is_dir():
+                    sub_state = d / "state"
+                    if sub_state.exists():
+                        try:
+                            mtime = sub_state.stat().st_mtime
+                            candidates.append((mtime, d))
+                        except OSError:
+                            pass
+        except OSError:
+            pass
 
     if not candidates:
-        print("No report directories found")
+        searched = ", ".join(str(d) for d in search_dirs if d.exists())
+        print(f"No report directories found in: {searched or '(no directories exist)'}")
         sys.exit(1)
 
     # Return most recent

@@ -20,7 +20,7 @@ Options:
     --download-papers   Download cited open-access papers
     --audio             Generate audio-friendly version
     --expertise LEVEL   beginner, intermediate (default), expert
-    --report-type TYPE  state-of-the-art, tutorial, comparison, survey
+    --report-type TYPE  deep-dive, tutorial, comparison, survey
     --resume PATH       Resume from existing report directory
     --list, -l          List unfinished reports and resume one
     --delete, -d        Delete a report from the registry
@@ -72,7 +72,7 @@ else:
 
 OPTION_DESCRIPTIONS = {
     "report_type": {
-        "state-of-the-art": "Deep analysis of current research frontier",
+        "deep-dive": "In-depth analysis of the latest developments and best practices",
         "tutorial": "Step-by-step learning guide with examples",
         "comparison": "Side-by-side analysis of approaches or technologies",
         "survey": "Broad landscape overview of a field",
@@ -168,7 +168,10 @@ def _prompt_choice(prompt: str, options: list[str], default: int = 0,
             return options[default]
 
         if allow_other and result in ("Other (specify)", "__other__"):
-            custom = questionary.text("Enter custom value:", style=custom_style).ask()
+            custom = questionary.text(
+                "Enter custom value (e.g., 'technical deep-dive with code examples'):",
+                style=custom_style
+            ).ask()
             return f"custom:{custom}" if custom else options[default]
 
         return result
@@ -194,7 +197,7 @@ def _prompt_choice(prompt: str, options: list[str], default: int = 0,
                 if 0 <= idx < len(options):
                     return options[idx]
                 if allow_other and idx == len(options):
-                    custom = input("Enter custom value: ").strip()
+                    custom = input("Enter custom value (e.g., 'technical deep-dive with code examples'): ").strip()
                     if custom:
                         return f"custom:{custom}"
                     print("Custom value cannot be empty")
@@ -405,7 +408,7 @@ def _analyze_topic_defaults(topic: str) -> dict:
     elif any(_word_boundary_match(s, t) for s in survey_signals):
         report_type_default = 3  # survey
     else:
-        report_type_default = 0  # state-of-the-art
+        report_type_default = 0  # deep-dive
 
     return {
         "expertise_default": expertise_default,
@@ -430,6 +433,11 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
 
     # Show fancy header (clears screen)
     ui.interview_header()
+
+    # Hint for first-time users
+    profile_path = Path.home() / ".deep-report" / "profile.json"
+    if not profile_path.exists():
+        ui.dim("First time? Run 'deep-report --intro' for a guided introduction")
 
     # Handle long topics: prompt for short name
     brief = ""
@@ -467,10 +475,14 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
     recs = analyzer.get_recommendations(timeout=3.0)
 
     # Report type - allow custom types like "technical deep-dive with code examples"
-    report_type_options = ["state-of-the-art", "tutorial", "comparison", "survey"]
+    report_type_options = ["deep-dive", "tutorial", "comparison", "survey"]
     # Use AI recommendation for default if available
-    if recs and recs.get("report_type") in report_type_options:
-        report_type_default = report_type_options.index(recs["report_type"])
+    # Map legacy "state-of-the-art" from AI recs to "deep-dive"
+    rec_report_type = recs.get("report_type", "") if recs else ""
+    if rec_report_type == "state-of-the-art":
+        rec_report_type = "deep-dive"
+    if rec_report_type in report_type_options:
+        report_type_default = report_type_options.index(rec_report_type)
     else:
         report_type_default = topic_hints["report_type_default"]
     report_type_choices = _build_choices(
@@ -508,7 +520,7 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
         rec_agents = max(3, min(recs["agent_count"], 30))
         agent_default = rec_agents
     agent_count = _prompt_int(
-        "How many research agents? (more = broader coverage, higher cost)",
+        "How many research agents? (~$0.50-2.00/agent for opus, ~$0.15-0.50 for sonnet)",
         default=agent_default, min_val=3, max_val=30
     )
 
@@ -541,6 +553,7 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
 
     # ─── Step 4: Seed References ───
     ui.step("Step 4/4 — Seed References")
+    ui.info("Provide existing documents (PDFs, URLs, .md files) as starting material. Agents use these to ground their research. (Optional)")
 
     seed_urls = []
     seed_folder = None
@@ -608,7 +621,7 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
     })
 
     if not _prompt_yes_no("\nProceed with this configuration?", default=True):
-        print("Cancelled.")
+        ui.info("Cancelled")
         return None
 
     return {
@@ -642,7 +655,7 @@ class OrchestratorContext:
         """Initialize context objects for a report."""
         self.progress = ProgressWriter(report_dir)
         self.approval = ApprovalGate(report_dir, self.interactive, self.progress)
-        self.intervention = InterventionHandler(report_dir, self.progress)
+        self.intervention = InterventionHandler(report_dir, self.progress, self.interactive)
         # Set verbose mode on global UI
         ui.set_verbose(self.verbose)
 
@@ -670,8 +683,8 @@ Examples:
     parser.add_argument("--quick", action="store_true",
                         help="Skip interview, use sensible defaults")
     parser.add_argument("--interactive", action="store_true",
-                        help="Pause for approval before research and each iteration")
-    parser.add_argument("--model", default="sonnet", choices=["sonnet", "opus"],
+                        help="Ask for your OK before spending money on research and before each follow-up round")
+    parser.add_argument("--model", default=None, choices=["sonnet", "opus"],
                         help="Model for research agents (default: sonnet)")
     def _validate_agents(value):
         val = int(value)
@@ -679,19 +692,19 @@ Examples:
             raise argparse.ArgumentTypeError(f"agents must be between 3 and 30, got {val}")
         return val
 
-    parser.add_argument("--agents", type=_validate_agents, default=10,
-                        help="Number of research agents (3-30, default: 10)")
+    parser.add_argument("--agents", type=_validate_agents, default=None,
+                        help="Number of research agents to run (3-30, default: 10)")
     parser.add_argument("--refs", help="Seed references folder or comma-separated URLs")
     parser.add_argument("--download-papers", action="store_true",
-                        help="Download cited open-access papers")
+                        help="Download freely available research PDFs cited in the report (saved to papers/ folder)")
     parser.add_argument("--audio", action="store_true",
                         help="Generate audio-friendly version")
-    parser.add_argument("--expertise", default="intermediate",
+    parser.add_argument("--expertise", default=None,
                         choices=["beginner", "intermediate", "expert"],
-                        help="Expertise level (e.g., 'beginner', 'intermediate', 'expert')")
-    parser.add_argument("--report-type", default="state-of-the-art",
-                        choices=["state-of-the-art", "tutorial", "comparison", "survey"],
-                        help="Report type (e.g., 'state-of-the-art', 'tutorial', 'survey')")
+                        help="Expertise level (beginner/intermediate/expert)")
+    parser.add_argument("--report-type", default=None,
+                        choices=["deep-dive", "tutorial", "comparison", "survey"],
+                        help="Report type (deep-dive/tutorial/comparison/survey)")
     parser.add_argument("--resume", help="Resume from existing report directory")
     parser.add_argument("--list", "-l", action="store_true",
                         help="List unfinished reports and resume one")
@@ -700,7 +713,7 @@ Examples:
     parser.add_argument("--output", help="Output directory (default: cwd/<topic> or ~/Documents/deep-reports/<topic>)")
     parser.add_argument("--cwd", help=argparse.SUPPRESS)
     parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Show detailed agent activity (press 'v' during execution to toggle)")
+                        help="Show per-agent progress, timing, retries, and error details")
     parser.add_argument("--update", action="store_true",
                         help="Update deep-report to latest version from GitHub")
     parser.add_argument("--setup-skill", action="store_true",
@@ -786,29 +799,48 @@ Examples:
         # Use AI recommendations for defaults not explicitly set via CLI
         analyzer = TopicAnalyzer(brief or topic, seed_refs=args.refs)
         analyzer.analyze_async()
-        recs = analyzer.get_recommendations(timeout=3.0)
+        with ui.spinner_task("Analyzing topic..."):
+            recs = analyzer.get_recommendations(timeout=3.0)
 
-        # Determine effective values: CLI flag > AI recommendation > hardcoded default
-        effective_model = args.model
-        effective_expertise = args.expertise
-        effective_report_type = args.report_type
-        effective_agents = args.agents
+        # Determine effective values: CLI flag (non-None) > AI recommendation > hardcoded default
+        effective_model = args.model or "sonnet"
+        effective_expertise = args.expertise or "intermediate"
+        effective_report_type = args.report_type or "deep-dive"
+        effective_agents = args.agents if args.agents is not None else 10
 
-        # Only apply AI recs when user didn't explicitly set CLI flags
-        # (argparse defaults are the signal that user didn't override)
+        # Only apply AI recs when user didn't explicitly set CLI flags (None = unset)
         if recs:
-            if args.model == "sonnet" and recs.get("model") in ("sonnet", "opus"):
+            if args.model is None and recs.get("model") in ("sonnet", "opus"):
                 effective_model = recs["model"]
-            if args.expertise == "intermediate" and recs.get("expertise") in ("beginner", "intermediate", "expert"):
+                if effective_model != "sonnet":
+                    ui.info(f"AI recommended: {effective_model} model ({recs.get('model_reason', '')})")
+            if args.expertise is None and recs.get("expertise") in ("beginner", "intermediate", "expert"):
                 effective_expertise = recs["expertise"]
-            if args.report_type == "state-of-the-art" and recs.get("report_type") in ("state-of-the-art", "tutorial", "comparison", "survey"):
-                effective_report_type = recs["report_type"]
-            if args.agents == 10 and isinstance(recs.get("agent_count"), int):
+                if effective_expertise != "intermediate":
+                    ui.info(f"AI recommended: {effective_expertise} expertise ({recs.get('expertise_reason', '')})")
+            if args.report_type is None and recs.get("report_type") in ("state-of-the-art", "deep-dive", "tutorial", "comparison", "survey"):
+                rec_rt = recs["report_type"]
+                if rec_rt == "state-of-the-art":
+                    rec_rt = "deep-dive"
+                effective_report_type = rec_rt
+                if effective_report_type != "deep-dive":
+                    ui.info(f"AI recommended: {effective_report_type} report type ({recs.get('report_type_reason', '')})")
+            if args.agents is None and isinstance(recs.get("agent_count"), int):
                 effective_agents = max(3, min(recs["agent_count"], 30))
+                if effective_agents != 10:
+                    ui.info(f"AI recommended: {effective_agents} agents ({recs.get('agent_count_reason', '')})")
 
         clamped_agents = max(3, min(effective_agents, 30))
         if clamped_agents != effective_agents:
             ui.warning(f"Agent count adjusted from {effective_agents} to {clamped_agents} (valid range: 3-30)")
+
+        # Show quick mode config summary
+        ui.config_summary({
+            "Model": effective_model,
+            "Agents": clamped_agents,
+            "Type": effective_report_type,
+            "Expertise": effective_expertise,
+        })
 
         config = {
             "topic": topic,
@@ -1051,7 +1083,11 @@ def setup_skill() -> int:
 
 def show_intro() -> int:
     """Show onboarding guide with flow explanation and examples."""
-    from rich.console import Console
+    if not RICH_AVAILABLE:
+        print("Install 'rich' for the best onboarding experience.")
+        print("Run: pip install rich")
+        return 0
+
     from rich.panel import Panel
     from rich.markdown import Markdown
 
@@ -1226,9 +1262,20 @@ def resume_report(report_dir: Path, ctx: OrchestratorContext) -> int:
     }
     current_phase = state.current_phase
     target_phase = current_phase + 1
-    ui.info(f"Last completed phase: {current_phase}")
     step_display = _step_display_names.get(state.current_step, state.current_step)
-    ui.info(f"Last step: {step_display}")
+
+    # Detailed resume recap (defensive for legacy state files)
+    completed = getattr(state, 'completed_threads', [])
+    failed = getattr(state, 'failed_threads', [])
+    iteration = getattr(state, 'research_iteration', 0)
+    max_iter = getattr(state, 'max_iterations', 1)
+    est_cost = getattr(state, 'estimated_cost', 0.0)
+
+    ui.step(f"Resuming report: {ui._truncate(state.topic, 60)}")
+    ui.info(f"  Completed: {len(completed)} agents, Failed: {len(failed)}")
+    ui.info(f"  Iterations: {iteration}/{max_iter}")
+    ui.info(f"  Estimated cost so far: ${est_cost:.2f}")
+    ui.info(f"  Resuming from Phase {target_phase}: {step_display}")
 
     # Check if report is already complete
     if current_phase >= 5:
@@ -1271,9 +1318,9 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
 
     phases = [
         (1, "Setup", lambda s: True),  # Already done if start_phase > 1
-        (2, "Plan", run_plan),
-        (3, "Research", lambda s: run_research(s, ctx.approval, ctx.progress)),
-        (4, "Synthesize", run_synthesize),
+        (2, "Planning", run_plan),
+        (3, "Research", lambda s: run_research(s, ctx.approval, ctx.progress, ctx.intervention)),
+        (4, "Synthesis", run_synthesize),
         (5, "Cleanup", run_cleanup),
     ]
 
@@ -1328,7 +1375,7 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
 
                 if not success:
                     ui.error(f"Phase {phase_num} ({phase_name}) failed")
-                    ui.info(f"You can resume from this phase with: deep-report --resume")
+                    ui.info(f"Resume with: deep-report --resume {state.report_dir}")
                     if not ctx.verbose:
                         ui.info("Re-run with verbose mode (press 'v') for full details")
                     if ctx.progress:
@@ -1345,9 +1392,11 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
                 elif phase_num == 2:
                     thread_count = len(state.threads)
                     ui.info(f"Plan ready — {thread_count} agents will research in parallel")
+                    ui.dim("Research phase typically takes 10-30 minutes depending on agent count and model")
                 elif phase_num == 3:
                     completed = len(state.completed_threads)
                     ui.info(f"Research complete — synthesizing findings from {completed} agents...")
+                    ui.dim("Synthesis typically takes 5-15 minutes")
                 elif phase_num == 4:
                     ui.info("Report assembled — running final cleanup...")
 
@@ -1360,11 +1409,13 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
                 return 130
 
             except Exception as e:
-                ui.error(f"Error in phase {phase_num}: {e}")
+                ui.error(f"Unexpected error: {e}")
+                ui.info(f"Resume with: deep-report --resume {state.report_dir}")
+                if ctx.verbose:
+                    import traceback
+                    traceback.print_exc()
                 if ctx.progress:
                     ctx.progress.error(phase_num, str(e))
-                import traceback
-                traceback.print_exc()
                 return 1
     finally:
         signal.signal(signal.SIGINT, original_handler)

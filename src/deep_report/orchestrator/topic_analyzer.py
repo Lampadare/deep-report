@@ -57,7 +57,7 @@ class TopicAnalyzer:
                 f"Topic: {self.topic[:500]}\n"
                 f"{seed_info}\n"
                 f"Return ONLY a JSON object:\n"
-                f'{{"report_type": "state-of-the-art|tutorial|comparison|survey",'
+                f'{{"report_type": "deep-dive|tutorial|comparison|survey",'
                 f' "report_type_reason": "brief reason",'
                 f' "expertise": "beginner|intermediate|expert",'
                 f' "expertise_reason": "brief reason",'
@@ -127,7 +127,7 @@ class TopicAnalyzer:
             report_type = "survey"
             report_type_reason = "Topic suggests a broad landscape review"
         else:
-            report_type = "state-of-the-art"
+            report_type = "deep-dive"
             report_type_reason = "Deep analysis is the best default for this topic"
 
         # Agent count heuristic

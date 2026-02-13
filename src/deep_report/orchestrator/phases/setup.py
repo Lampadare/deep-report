@@ -128,7 +128,7 @@ def run_setup(state: State, args: dict) -> bool:
             - download_papers: Whether to download cited papers
             - generate_audio: Whether to generate audio version
             - expertise_level: beginner/intermediate/expert
-            - report_type: state-of-the-art/tutorial/comparison/survey
+            - report_type: deep-dive/tutorial/comparison/survey
 
     Returns:
         True if setup succeeded, False otherwise
@@ -136,13 +136,13 @@ def run_setup(state: State, args: dict) -> bool:
     # Extract args
     topic = args.get("topic", "").strip()
     if not topic:
-        ui.error("No topic provided")
+        ui.error("Setup failed: no topic provided")
         return False
 
     # Sanitize topic before any use
     topic = _sanitize_topic(topic)
     if not topic:
-        ui.error("Topic is empty after sanitization")
+        ui.error("Setup failed: topic is empty after sanitization")
         return False
 
     state.topic = topic
@@ -164,7 +164,7 @@ def run_setup(state: State, args: dict) -> bool:
             return False
 
     if not any(_is_path_under(resolved, p) for p in allowed_parents):
-        ui.error("Report directory must be within home or current working directory")
+        ui.error("Setup failed: report directory must be within home or current working directory")
         return False
 
     state.report_dir = str(report_dir)
@@ -180,7 +180,7 @@ def run_setup(state: State, args: dict) -> bool:
     state.download_papers = args.get("download_papers", True)
     state.generate_audio = args.get("generate_audio", False)
     state.expertise_level = args.get("expertise_level", "intermediate")
-    state.report_type = args.get("report_type", "state-of-the-art")
+    state.report_type = args.get("report_type", "deep-dive")
     state.seed_urls = args.get("seed_urls", [])
     state.seed_refs_folder = args.get("seed_refs_folder")
 
@@ -200,7 +200,7 @@ def run_setup(state: State, args: dict) -> bool:
     try:
         _create_directories(report_dir)
     except (OSError, PermissionError) as e:
-        ui.error(f"Failed to create directories: {e}")
+        ui.error(f"Directory creation failed: {e}")
         return False
     state.checkpoint("directories_created")
 
@@ -215,7 +215,7 @@ def run_setup(state: State, args: dict) -> bool:
     try:
         _write_manifest(state)
     except (OSError, PermissionError) as e:
-        ui.error(f"Failed to write manifest: {e}")
+        ui.error(f"Manifest writing failed: {e}")
         return False
     state.checkpoint("manifest_written")
 
@@ -448,7 +448,7 @@ CRITICAL: You MUST call the Write tool with file_path="{output_file}" at the end
 
     failed = [tid for tid, r in results.items() if not r.success]
     if failed:
-        ui.warning(f"Failed to process seeds: {failed}")
+        ui.warning(f"Seed processing failed: {failed}")
 
     return True
 
@@ -475,7 +475,7 @@ def _summarize_seeds(state: State):
         try:
             content = seed_file.read_text()
         except Exception as e:
-            ui.warning(f"Failed to read {seed_file}: {e}")
+            ui.warning(f"Seed file reading failed for {seed_file}: {e}")
             continue
 
         # Use brief if available (detailed research instructions), otherwise topic
@@ -525,7 +525,7 @@ CRITICAL: You MUST call Write tool with file_path="{summary_file}" to save your 
 
     failed = [tid for tid, r in results.items() if not r.success]
     if failed:
-        ui.warning(f"Failed to summarize seeds: {failed}")
+        ui.warning(f"Seed summarization failed: {failed}")
 
 
 def _write_scope(state: State):
@@ -542,7 +542,7 @@ def _write_scope(state: State):
                 content = f.read_text()[:2000]  # Limit per seed
                 seed_context += f"\n### {f.stem}\n{content}\n"
             except (OSError, IOError) as e:
-                ui.warning(f"Failed to read seed summary {f.name}: {e}")
+                ui.warning(f"Seed summary reading failed for {f.name}: {e}")
 
     # Use brief if available (detailed research instructions), otherwise topic
     research_instructions = state.brief or state.topic
@@ -567,10 +567,11 @@ Include these sections (under 1000 words total):
 CRITICAL: You MUST call Write tool with file_path="{scope_file}" to save the scope document.
 """
 
-    result = spawn_agent(
-        prompt, model="opus", output_file=scope_file, timeout_secs=540,
-        allowed_tools=["Read", "Write"]
-    )
+    with ui.spinner_task("Writing scope document..."):
+        result = spawn_agent(
+            prompt, model="opus", output_file=scope_file, timeout_secs=540,
+            allowed_tools=["Read", "Write"]
+        )
     if not result.success:
         # Write a minimal scope if agent fails
         scope_file.write_text(f"""# Research Scope: {state.topic}

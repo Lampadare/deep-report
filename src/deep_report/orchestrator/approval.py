@@ -76,7 +76,7 @@ class ApprovalGate:
             self.approval_file.parent.mkdir(parents=True, exist_ok=True)
             self.approval_file.write_text(json.dumps(request, indent=2))
         except Exception as e:
-            ui.warning(f"Could not save approval state: {e}")
+            ui.warning(f"Approval state saving failed: {e}")
 
         if self.progress:
             self.progress.approval_waiting(gate_id)
@@ -124,8 +124,8 @@ class ApprovalGate:
                     prompt = "[bold]Proceed?[/] " + ("[Enter/s/q]: " if is_iteration else "[Enter/q]: ")
                     response = console.input(prompt).strip().lower()
                 except EOFError:
-                    console.print(f"\n[yellow]No input available, proceeding[/]")
-                    response = ''
+                    ui.warning("No interactive input available — rejecting for safety")
+                    response = 'q'
             else:
                 print(f"\n{'='*60}")
                 print(f"APPROVAL REQUIRED: {gate_id}")
@@ -146,18 +146,20 @@ class ApprovalGate:
                     prompt = "Proceed? " + ("[Enter/s/q]: " if is_iteration else "[Enter/q]: ")
                     response = input(prompt).strip().lower()
                 except EOFError:
-                    print("\nNo input available, proceeding")
-                    response = ''
+                    ui.warning("No interactive input available — rejecting for safety")
+                    response = 'q'
 
             if response == 'q':
                 break
             elif response in ('s',) and is_iteration:
                 break
-            elif response in ('y', 'yes', ''):
+            elif response == '':
                 break
             else:
-                valid = "Enter, s, or q" if is_iteration else "Enter or q"
-                ui.warning(f"Unrecognized input '{response}'. Please enter {valid}.")
+                if is_iteration:
+                    ui.warning(f"Unrecognized input '{response}'. Options: Enter (proceed), s (stop & synthesize), q (quit, progress saved)")
+                else:
+                    ui.warning(f"Unrecognized input '{response}'. Options: Enter (proceed), q (quit, progress saved)")
                 continue
 
         if response == 'q':

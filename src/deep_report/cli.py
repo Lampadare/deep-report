@@ -3,6 +3,7 @@
 
 import sys
 import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -15,6 +16,24 @@ def check_claude_cli():
         ui.info("Install from: https://claude.ai/download")
         ui.info("After installing, run 'claude' once to authenticate.")
         sys.exit(1)
+
+
+def check_claude_auth():
+    """Probe Claude CLI authentication. Warns on failure, never blocks."""
+    try:
+        result = subprocess.run(
+            ["claude", "--print", "--model", "haiku", "say ok"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            from .orchestrator.ui import ui
+            ui.warning("Claude CLI may not be authenticated. Run 'claude' to log in.")
+    except subprocess.TimeoutExpired:
+        from .orchestrator.ui import ui
+        ui.warning("Claude CLI auth check timed out. Run 'claude' to verify authentication.")
+    except Exception:
+        # Don't block on unexpected errors
+        pass
 
 
 def main():
@@ -31,8 +50,11 @@ def main():
         # Let orchestrator handle --help
         pass
     else:
-        # Check Claude CLI before running
+        # Check Claude CLI before running (skip for non-report commands)
         check_claude_cli()
+        skip_auth_flags = {"--list", "--delete", "--setup-skill", "--install-skill", "--intro", "--update"}
+        if not skip_auth_flags.intersection(sys.argv):
+            check_claude_auth()
 
     # Import and run orchestrator
     from .orchestrator.main import main as orchestrator_main

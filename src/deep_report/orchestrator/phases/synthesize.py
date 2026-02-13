@@ -26,8 +26,10 @@ def run_synthesize(state: State) -> bool:
 
     # Guard: need at least some completed research
     if agent_count == 0:
-        ui.error("No completed research to synthesize")
+        ui.error("Synthesis failed: no completed research to synthesize")
         return False
+
+    ui.info("Writing your report from all research findings. This typically takes 5-15 minutes.")
 
     # Determine synthesis strategy
     if agent_count <= 10:
@@ -40,7 +42,9 @@ def run_synthesize(state: State) -> bool:
         success = _multi_pass_synthesis(state, report_dir)
 
     if not success:
-        ui.error("Synthesis failed")
+        ui.warning("All research is preserved despite synthesis failure")
+        ui.info(f"  Raw research: {report_dir}/full/agents/")
+        ui.info(f"  Resume to retry: deep-report --resume {report_dir}")
         return False
 
     state.report_assembled = True
@@ -70,6 +74,19 @@ def run_synthesize(state: State) -> bool:
     return True
 
 
+def _poll_output_file(path: Path, stop_event: threading.Event, word_count_ref: list,
+                      interval: float = 10.0):
+    """Background poller that updates word_count_ref[0] from a growing output file."""
+    while not stop_event.wait(interval):
+        try:
+            if path.exists():
+                word_count = len(path.read_text().split())
+                if word_count > 0:
+                    word_count_ref[0] = word_count
+        except (OSError, IOError, UnicodeDecodeError, ValueError):
+            pass
+
+
 def _single_pass_synthesis(state: State, report_dir: Path) -> bool:
     """Single agent writes the entire report."""
 
@@ -79,7 +96,7 @@ def _single_pass_synthesis(state: State, report_dir: Path) -> bool:
     # Gather file paths - agent will read them
     research_files = sorted(full_dir.glob("*.md"))
     if not research_files:
-        ui.error("No research files found")
+        ui.error("Synthesis failed: no research files found")
         return False
 
     file_list = "\n".join(f"- {f}" for f in research_files)
@@ -121,11 +138,26 @@ Guidelines:
 CRITICAL: You MUST call Write tool with file_path="{report_file}" to save the report.
 """
 
-    with ui.spinner_task("Synthesis agent working (this may take a while)..."):
-        result = spawn_agent(
-            prompt, model="opus", output_file=report_file, timeout_secs=2700,
-            allowed_tools=AGENT_TOOLS["synthesis"]
-        )
+    stop_event = threading.Event()
+    word_count_ref = [0]
+    poll_thread = threading.Thread(
+        target=_poll_output_file, args=(report_file, stop_event, word_count_ref),
+        daemon=True,
+    )
+    poll_thread.start()
+
+    try:
+        with ui.spinner_task("Synthesis agent working (this may take a while)..."):
+            result = spawn_agent(
+                prompt, model="opus", output_file=report_file, timeout_secs=2700,
+                allowed_tools=AGENT_TOOLS["synthesis"]
+            )
+    finally:
+        stop_event.set()
+        poll_thread.join(timeout=2)
+
+    if word_count_ref[0] > 0 and not result.success:
+        ui.info(f"Partial synthesis output: {word_count_ref[0]:,} words written before failure")
 
     if result.success and report_file.exists():
         word_count = RoleEnforcer.count_words_streaming(report_file)
@@ -152,7 +184,7 @@ def _multi_pass_synthesis(state: State, report_dir: Path) -> bool:
 
     successful_parts = [r for r in synthesis_results if r["success"]]
     if len(successful_parts) < len(clusters) // 2:
-        ui.error(f"Too many synthesis failures: {len(successful_parts)}/{len(clusters)}")
+        ui.error(f"Multi-pass synthesis failed: too many failures ({len(successful_parts)}/{len(clusters)} succeeded)")
         return False
 
     state.synthesis_parts = [p["file"] for p in successful_parts]
@@ -193,7 +225,7 @@ def _cluster_threads(state: State, summaries_dir: Path) -> list[dict]:
             content = f.read_text()[:500]
             thread_summaries.append(f"{thread_id}: {content}")
         except (OSError, IOError) as e:
-            ui.warning(f"Failed to read summary {f.name}: {e}")
+            ui.warning(f"Summary reading failed for {f.name}: {e}")
 
     num_clusters = min(5, max(2, len(thread_summaries) // 4))
 
@@ -394,11 +426,11 @@ CRITICAL: You MUST call Write tool with file_path="{header_file}" to save the he
         )
 
     if not result.success:
-        ui.warning(f"Header generation failed: {result.error}")
+        ui.warning(f"Header writing failed: {result.error}")
         return False
 
     if not header_file.exists():
-        ui.warning("Header file not created")
+        ui.warning("Header writing failed: output file not created")
         return False
 
     return True
@@ -444,11 +476,11 @@ CRITICAL: You MUST call Write tool with file_path="{conclusion_file}" to save th
         )
 
     if not result.success:
-        ui.warning(f"Conclusion generation failed: {result.error}")
+        ui.warning(f"Conclusion writing failed: {result.error}")
         return False
 
     if not conclusion_file.exists():
-        ui.warning("Conclusion file not created")
+        ui.warning("Conclusion writing failed: output file not created")
         return False
 
     return True
@@ -464,7 +496,7 @@ def _assemble_report(report_file: Path, header_file: Path, parts: list[dict], co
         try:
             sections.append(header_file.read_text())
         except (OSError, IOError) as e:
-            ui.warning(f"Failed to read header file: {e}")
+            ui.warning(f"Header reading failed: {e}")
 
     # Main sections
     for p in sorted(parts, key=lambda x: x["cluster_id"]):
@@ -474,7 +506,7 @@ def _assemble_report(report_file: Path, header_file: Path, parts: list[dict], co
                 content = part_file.read_text()
                 sections.append(f"\n\n---\n\n# {p['title']}\n\n{content}")
             except (OSError, IOError) as e:
-                ui.warning(f"Failed to read part file {part_file.name}: {e}")
+                ui.warning(f"Part file reading failed for {part_file.name}: {e}")
         else:
             ui.warning(f"Missing synthesis part: {part_file.name}")
 
@@ -483,18 +515,18 @@ def _assemble_report(report_file: Path, header_file: Path, parts: list[dict], co
         try:
             sections.append(f"\n\n---\n\n{conclusion_file.read_text()}")
         except (OSError, IOError) as e:
-            ui.warning(f"Failed to read conclusion file: {e}")
+            ui.warning(f"Conclusion reading failed: {e}")
 
     # Check if we have actual content beyond just the header
     has_header_only = len(sections) == 1 and header_file.exists()
     if not sections or has_header_only:
-        ui.error("No content sections available for report assembly")
-        raise RuntimeError("No content sections available for report assembly")
+        ui.error("Report assembly failed: no content sections available")
+        raise RuntimeError("Report assembly failed: no content sections available")
 
     try:
         report_file.write_text("\n".join(sections))
     except (OSError, PermissionError) as e:
-        ui.error(f"Failed to write final report: {e}")
+        ui.error(f"Report writing failed: {e}")
         raise
 
 
@@ -554,7 +586,7 @@ def _generate_audio(state: State, report_dir: Path):
     try:
         file_size = report_file.stat().st_size
     except OSError as e:
-        ui.warning(f"Failed to stat report file: {e}")
+        ui.warning(f"Report file stat failed: {e}")
         return
 
     if file_size > MAX_AUDIO_SIZE:
@@ -564,7 +596,7 @@ def _generate_audio(state: State, report_dir: Path):
         try:
             report_content = report_file.read_text()
         except (OSError, IOError) as e:
-            ui.warning(f"Failed to read report for audio conversion: {e}")
+            ui.warning(f"Audio conversion failed: could not read report: {e}")
             return
         _generate_audio_multi(state, report_dir, report_content)
         return
@@ -573,7 +605,7 @@ def _generate_audio(state: State, report_dir: Path):
     try:
         report_content = report_file.read_text()
     except (OSError, IOError) as e:
-        ui.warning(f"Failed to read report for audio conversion: {e}")
+        ui.warning(f"Audio conversion failed: could not read report: {e}")
         return
     word_count = len(report_content.split())
 
@@ -685,13 +717,13 @@ CRITICAL: You MUST call Write tool with file_path="{part_file}" to save.
             try:
                 audio_parts.append(part_file.read_text())
             except Exception as e:
-                ui.warning(f"Failed to read audio part {i}: {e}")
+                ui.warning(f"Audio part {i} reading failed: {e}")
 
     if audio_parts:
         try:
             audio_file.write_text("\n\n---\n\n".join(audio_parts))
         except (OSError, PermissionError) as e:
-            ui.warning(f"Failed to write audio file: {e}")
+            ui.warning(f"Audio file writing failed: {e}")
 
     # Clean up temporary audio part files
     for temp_file in temp_files:
@@ -717,7 +749,8 @@ def _download_papers(state: State, report_dir: Path):
 
         ui.verbose(f"Downloading papers to: {papers_dir}")
         downloader = PaperDownloader(papers_dir)
-        results = downloader.download_all(refs_file)
+        with ui.spinner_task("Downloading open-access papers..."):
+            results = downloader.download_all(refs_file)
 
         # Print summary
         ui.info(downloader.get_summary())
@@ -726,4 +759,4 @@ def _download_papers(state: State, report_dir: Path):
         # Fallback if requests not installed
         ui.warning("Paper download requires 'requests' library. Skipping.")
     except Exception as e:
-        ui.warning(f"Paper download error: {e}")
+        ui.warning(f"Paper download failed: {e}")
