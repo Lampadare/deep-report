@@ -30,6 +30,7 @@ Options:
 """
 
 import argparse
+import signal
 import sys
 from pathlib import Path
 from typing import Optional
@@ -48,6 +49,7 @@ from .intervention import InterventionHandler
 from .phases import run_setup, run_plan, run_research, run_synthesize, run_cleanup
 from .ui import ui
 from .utils.keyboard import VerboseToggle
+from .utils.agents import process_tracker
 
 
 # Custom style for questionary prompts
@@ -286,6 +288,49 @@ def _prompt_seed_folder(cwd: Path) -> Optional[str]:
     return str(cwd / folder_name)
 
 
+def _analyze_topic_defaults(topic: str) -> dict:
+    """Analyze topic to suggest smart defaults for report type and expertise."""
+    t = topic.lower()
+
+    # Expertise hints
+    expert_signals = [
+        "advanced", "novel", "optimization", "theorem", "proof",
+        "phd", "doctoral", "state-of-the-art", "sota", "frontier",
+        "architecture", "mechanism", "formal", "signal chain",
+        "impedance", "spectroscopy", "pharmacokinetic", "nanoscale",
+    ]
+    beginner_signals = [
+        "introduction", "beginner", "basics", "getting started",
+        "what is", "overview", "101", "primer", "guide for",
+    ]
+
+    if any(s in t for s in expert_signals):
+        expertise_default = 2  # expert
+    elif any(s in t for s in beginner_signals):
+        expertise_default = 0  # beginner
+    else:
+        expertise_default = 1  # intermediate
+
+    # Report type hints
+    comparison_signals = [" vs ", "versus", "comparison", "compare", "differences between"]
+    tutorial_signals = ["how to", "tutorial", "guide", "learn", "step by step"]
+    survey_signals = ["survey", "landscape", "overview of", "review of"]
+
+    if any(s in t for s in comparison_signals):
+        report_type_default = 2  # comparison
+    elif any(s in t for s in tutorial_signals):
+        report_type_default = 1  # tutorial
+    elif any(s in t for s in survey_signals):
+        report_type_default = 3  # survey
+    else:
+        report_type_default = 0  # state-of-the-art
+
+    return {
+        "expertise_default": expertise_default,
+        "report_type_default": report_type_default,
+    }
+
+
 def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = None,
                             defaults: dict = None) -> dict:
     """Run interactive configuration interview.
@@ -326,10 +371,12 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
     # ─── Report Settings ───
     ui.section_divider("Report Settings")
 
+    # Smart defaults based on topic analysis
+    topic_hints = _analyze_topic_defaults(brief or topic)
+
     # Report type - allow custom types like "technical deep-dive with code examples"
     report_type_options = ["state-of-the-art", "tutorial", "comparison", "survey"]
-    report_type_default = report_type_options.index(defaults.get('report_type', 'state-of-the-art')) \
-        if defaults.get('report_type') in report_type_options else 0
+    report_type_default = topic_hints["report_type_default"]
     report_type = _prompt_choice(
         "What type of report?",
         report_type_options,
@@ -339,8 +386,7 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
 
     # Expertise level - allow custom audience descriptions
     expertise_options = ["beginner", "intermediate", "expert"]
-    expertise_default = expertise_options.index(defaults.get('expertise', 'intermediate')) \
-        if defaults.get('expertise') in expertise_options else 1
+    expertise_default = topic_hints["expertise_default"]
     expertise = _prompt_choice(
         "Target expertise level?",
         expertise_options,
@@ -1024,6 +1070,23 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
         (5, "Cleanup", run_cleanup),
     ]
 
+    # Graceful shutdown: 1st Ctrl+C saves + kills agents, 2nd force-exits
+    _ctrl_c_count = [0]
+
+    def _handle_sigint(signum, frame):
+        _ctrl_c_count[0] += 1
+        if _ctrl_c_count[0] == 1:
+            ui.warning("Shutting down gracefully... (Ctrl+C again to force)")
+            state.save()
+            process_tracker.shutdown(timeout=10)
+            raise KeyboardInterrupt
+        else:
+            ui.warning("Force killing all agents...")
+            process_tracker.shutdown(timeout=0)
+            sys.exit(130)
+
+    original_handler = signal.signal(signal.SIGINT, _handle_sigint)
+
     try:
         for phase_num, phase_name, phase_func in phases:
             if phase_num < start_phase:
@@ -1059,7 +1122,7 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
                 traceback.print_exc()
                 return 1
     finally:
-        # Stop verbose toggle listener
+        signal.signal(signal.SIGINT, original_handler)
         verbose_toggle.stop()
 
     # Final summary with Rich UI

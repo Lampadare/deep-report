@@ -149,6 +149,61 @@ class CircuitBreaker:
         return True
 
 
+class ProcessTracker:
+    """Tracks spawned child processes for clean shutdown on Ctrl+C."""
+
+    def __init__(self):
+        self._processes: dict[int, subprocess.Popen] = {}
+        self._lock = threading.Lock()
+        self._shutting_down = False
+
+    def register(self, proc: subprocess.Popen):
+        with self._lock:
+            self._processes[proc.pid] = proc
+
+    def unregister(self, pid: int):
+        with self._lock:
+            self._processes.pop(pid, None)
+
+    @property
+    def is_shutting_down(self) -> bool:
+        return self._shutting_down
+
+    def shutdown(self, timeout: float = 10.0):
+        """SIGTERM all tracked processes, wait, then SIGKILL survivors."""
+        import signal as _signal
+        with self._lock:
+            self._shutting_down = True
+            pids = list(self._processes.keys())
+            procs = list(self._processes.values())
+
+        for pid in pids:
+            try:
+                os.killpg(os.getpgid(pid), _signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                pass
+
+        deadline = time.time() + timeout
+        for proc in procs:
+            remaining = max(0.1, deadline - time.time())
+            try:
+                proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                pass
+
+        for pid in pids:
+            try:
+                os.killpg(os.getpgid(pid), _signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+
+        with self._lock:
+            self._processes.clear()
+
+
+process_tracker = ProcessTracker()
+
+
 @dataclass
 class AgentResult:
     """Result from an agent execution."""
@@ -226,6 +281,7 @@ def spawn_agent(
             cwd=cwd or os.getcwd(),
             start_new_session=True,  # Create new process group for clean termination
         )
+        process_tracker.register(process)
 
         try:
             stdout, stderr = process.communicate(input=prompt, timeout=timeout_secs)
@@ -238,6 +294,7 @@ def spawn_agent(
                 # Fallback if process group kill fails
                 process.kill()
             process.wait()
+            process_tracker.unregister(process.pid)
             return AgentResult(
                 success=False,
                 output="",
@@ -245,6 +302,7 @@ def spawn_agent(
                 duration_secs=timeout_secs
             )
 
+        process_tracker.unregister(process.pid)
         duration = time.time() - start
 
         if process.returncode == 0:
@@ -291,6 +349,7 @@ def spawn_agent(
                 process.wait()
             except Exception:
                 pass
+            process_tracker.unregister(process.pid)
         return AgentResult(
             success=False,
             output="",

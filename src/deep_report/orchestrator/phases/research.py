@@ -256,15 +256,28 @@ def _run_research_batch(
     for t in thread_info[:max_workers]:
         ui.research_table_update(t["id"], "running")
 
-    # Progress callback with thread-safe counter
+    # Progress callback with thread-safe counter and incremental state saves
     completed = [0]
     total = len(tasks)
-    completed_lock = threading.Lock()
+    state_lock = threading.Lock()
 
     def on_complete(task_id: str, result: AgentResult):
-        with completed_lock:
+        with state_lock:
             completed[0] += 1
             current = completed[0]
+
+            # Incremental state save — survives Ctrl+C
+            if result.success:
+                if task_id not in state.completed_threads:
+                    state.completed_threads.append(task_id)
+                if not task_id.startswith("followup_"):
+                    state.update_thread(task_id, status="completed", output_file=result.output_file)
+            else:
+                if not task_id.startswith("followup_"):
+                    if task_id not in state.failed_threads:
+                        state.failed_threads.append(task_id)
+                    state.update_thread(task_id, status="failed")
+            state.save()
 
         # Update table status
         status = "complete" if result.success else "failed"

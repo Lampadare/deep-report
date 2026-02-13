@@ -51,6 +51,8 @@ def run_plan(state: State) -> bool:
     state.plan_written = True
     state.save()
 
+    ui.plan_summary(state.threads)
+
     # Write plan to file
     plan_file = report_dir / "state" / "plan.md"
     try:

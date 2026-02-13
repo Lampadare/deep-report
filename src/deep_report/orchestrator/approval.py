@@ -14,7 +14,6 @@ try:
     from rich.console import Console
     from rich.panel import Panel
     from rich.table import Table
-    from rich.prompt import Prompt
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
@@ -114,12 +113,7 @@ class ApprovalGate:
             console.print()
 
             try:
-                response = Prompt.ask(
-                    "[bold]Approve?[/]",
-                    choices=["y", "n", "q", ""],
-                    default="y",
-                    show_choices=False
-                ).strip().lower()
+                response = console.input("[bold]Approve?[/] (y): ").strip().lower()
             except EOFError:
                 console.print("\n[yellow]No input available, defaulting to reject[/]")
                 response = 'n'

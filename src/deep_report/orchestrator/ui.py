@@ -27,6 +27,7 @@ except ImportError:
 
 # Phase colors and icons for visual distinction
 PHASE_COLORS = ["cyan", "blue", "magenta", "green", "yellow"]
+SPINNER_CHARS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 PHASE_ICONS = {
     1: "🔧",  # Setup
     2: "📋",  # Plan
@@ -34,6 +35,16 @@ PHASE_ICONS = {
     4: "📝",  # Synthesize
     5: "✅",  # Cleanup
 }
+
+
+class _SpinnerTable:
+    """Wrapper that rebuilds the research table on each Live refresh for spinner animation."""
+
+    def __init__(self, builder):
+        self._builder = builder
+
+    def __rich_console__(self, console, options):
+        yield self._builder()
 
 
 class DeepReportUI:
@@ -61,9 +72,10 @@ class DeepReportUI:
         self._thread_times = {}
         self._research_title = ""
         self._research_live = None
-        # Thread safety for _thread_status
+        self._spinner_frame = 0
+        # Thread safety for _thread_status (RLock for reentrant access from Live refresh)
         import threading
-        self._status_lock = threading.Lock()
+        self._status_lock = threading.RLock()
 
     def set_verbose(self, enabled: bool):
         """Enable or disable verbose mode."""
@@ -329,7 +341,7 @@ class DeepReportUI:
 
         try:
             self._research_live = Live(
-                self._build_research_table(),
+                _SpinnerTable(self._build_research_table),
                 console=self.console,
                 refresh_per_second=4
             )
@@ -340,33 +352,37 @@ class DeepReportUI:
 
     def _build_research_table(self):
         """Build the research status table."""
-        table = Table(show_header=True, box=ROUNDED)
-        table.add_column("#", width=4, justify="right")
-        table.add_column("Thread", width=32)
-        table.add_column("Status", width=20)
+        with self._status_lock:
+            table = Table(show_header=True, box=ROUNDED)
+            table.add_column("#", width=4, justify="right")
+            table.add_column("Thread", width=32)
+            table.add_column("Status", width=20)
 
-        for i, thread in enumerate(self._threads, 1):
-            tid = thread["id"]
-            title = thread.get("title", tid)[:30]
-            status = self._thread_status.get(tid, "pending")
+            char = SPINNER_CHARS[self._spinner_frame % len(SPINNER_CHARS)]
+            self._spinner_frame += 1
 
-            if status == "pending":
-                status_text = "[dim]○ Pending[/]"
-            elif status == "running":
-                status_text = "[cyan]⠋ Running...[/]"
-            elif status == "complete":
-                time_str = f" ({self._thread_times.get(tid, 0):.0f}s)" if tid in self._thread_times else ""
-                status_text = f"[green]✓ Complete{time_str}[/]"
-            elif status == "failed":
-                status_text = "[red]✗ Failed[/]"
-            else:
-                status_text = f"[dim]{status}[/]"
+            for i, thread in enumerate(self._threads, 1):
+                tid = thread["id"]
+                title = thread.get("title", tid)[:30]
+                status = self._thread_status.get(tid, "pending")
 
-            table.add_row(str(i), title, status_text)
+                if status == "pending":
+                    status_text = "[dim]○ Pending[/]"
+                elif status == "running":
+                    status_text = f"[cyan]{char} Running...[/]"
+                elif status == "complete":
+                    time_str = f" ({self._thread_times.get(tid, 0):.0f}s)" if tid in self._thread_times else ""
+                    status_text = f"[green]✓ Complete{time_str}[/]"
+                elif status == "failed":
+                    status_text = "[red]✗ Failed[/]"
+                else:
+                    status_text = f"[dim]{status}[/]"
 
-        complete = sum(1 for s in self._thread_status.values() if s == "complete")
-        failed = sum(1 for s in self._thread_status.values() if s == "failed")
-        total = len(self._threads)
+                table.add_row(str(i), title, status_text)
+
+            complete = sum(1 for s in self._thread_status.values() if s == "complete")
+            failed = sum(1 for s in self._thread_status.values() if s == "failed")
+            total = len(self._threads)
 
         summary = f"Progress: {complete}/{total} complete"
         if failed:
@@ -377,22 +393,15 @@ class DeepReportUI:
 
     def research_table_update(self, thread_id: str, status: str, duration: float = 0):
         """Update a thread's status."""
-        new_table = None
         with self._status_lock:
             self._thread_status[thread_id] = status
             if duration:
                 self._thread_times[thread_id] = duration
-            # Build table while holding lock to ensure consistent snapshot
-            if RICH_AVAILABLE and self._research_live:
-                try:
-                    new_table = self._build_research_table()
-                except Exception:
-                    pass
 
-        # Update display outside lock to avoid blocking other threads
-        if new_table is not None:
+        # Live auto-refreshes via _SpinnerTable, but force an update for immediate feedback
+        if RICH_AVAILABLE and self._research_live:
             try:
-                self._research_live.update(new_table)
+                self._research_live.update(_SpinnerTable(self._build_research_table))
             except Exception:
                 pass
         elif not RICH_AVAILABLE:
@@ -408,12 +417,6 @@ class DeepReportUI:
                     break
             else:
                 return  # No pending threads
-
-        if RICH_AVAILABLE and self._research_live:
-            try:
-                self._research_live.update(self._build_research_table())
-            except Exception:
-                pass
 
     def research_table_complete(self):
         """Finalize and close the live table."""
@@ -445,6 +448,34 @@ class DeepReportUI:
             status = "SUFFICIENT" if sufficient else "NEEDS MORE"
             print(f"\nDecision (iteration {iteration}): {status}")
             print(f"  {reasoning}")
+
+    def plan_summary(self, threads: list[dict]):
+        """Display research plan threads in a table."""
+        if RICH_AVAILABLE:
+            table = Table(show_header=True, box=ROUNDED)
+            table.add_column("#", width=4, justify="right", style="dim")
+            table.add_column("Title", width=30)
+            table.add_column("Objective", width=44)
+
+            for i, thread in enumerate(threads, 1):
+                title = self._truncate(thread.get("title", thread.get("id", "")), 28)
+                objective = self._truncate(thread.get("objective", ""), 42)
+                table.add_row(str(i), title, objective)
+
+            self.console.print()
+            self.console.print(Panel(
+                table,
+                title="[bold]📋 RESEARCH PLAN[/]",
+                border_style="blue"
+            ))
+        else:
+            print("\n=== RESEARCH PLAN ===")
+            for i, thread in enumerate(threads, 1):
+                title = thread.get("title", thread.get("id", ""))[:40]
+                objective = thread.get("objective", "")[:50]
+                print(f"  {i:2d}. {title}")
+                print(f"      {objective}")
+            print()
 
     def final_summary(self, report_dir: str, stats: dict):
         """Display final report summary."""
