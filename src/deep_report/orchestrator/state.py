@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import tempfile
+import threading
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional, Any
@@ -179,52 +180,56 @@ class State:
 
     # Internal
     _state_file: str = field(default="", repr=False)
+    _save_lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
 
     def save(self):
         """Persist state to disk with atomic write and file locking."""
         if not self._state_file:
             return
 
-        # Ensure parent directory exists
-        state_path = Path(self._state_file)
-        state_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._save_lock:
+            # Ensure parent directory exists
+            state_path = Path(self._state_file)
+            state_path.parent.mkdir(parents=True, exist_ok=True)
 
-        data = asdict(self)
-        del data["_state_file"]
-        data["updated_at"] = datetime.now().isoformat()
+            data = asdict(self)
+            del data["_state_file"]
+            del data["_save_lock"]
+            data["updated_at"] = datetime.now().isoformat()
 
-        def json_default(obj):
-            """Handle non-serializable types."""
-            if hasattr(obj, '__dict__'):
-                return obj.__dict__
-            return str(obj)
+            def json_default(obj):
+                """Handle non-serializable types."""
+                if hasattr(obj, '__dict__'):
+                    return obj.__dict__
+                return str(obj)
 
-        try:
-            # Write to temp file first, then atomic rename
-            fd, tmp_path = tempfile.mkstemp(
-                dir=state_path.parent,
-                prefix=".state_",
-                suffix=".tmp"
-            )
             try:
-                with os.fdopen(fd, 'w') as f:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                    try:
-                        f.write(json.dumps(data, indent=2, default=json_default))
-                        f.flush()
-                        os.fsync(f.fileno())
-                    finally:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                os.rename(tmp_path, self._state_file)
-            except Exception:
-                # Clean up temp file on error
+                # Write to temp file first, then atomic rename
+                fd, tmp_path = tempfile.mkstemp(
+                    dir=state_path.parent,
+                    prefix=".state_",
+                    suffix=".tmp"
+                )
                 try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+                    with os.fdopen(fd, 'w') as f:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                        try:
+                            f.write(json.dumps(data, indent=2, default=json_default))
+                            f.flush()
+                            os.fsync(f.fileno())
+                        finally:
+                            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    os.rename(tmp_path, self._state_file)
+                except Exception:
+                    # Clean up temp file on error
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+                    raise
+            except OSError as e:
+                print(f"Warning: Failed to save state: {e}")
                 raise
-        except OSError as e:
-            print(f"Warning: Failed to save state: {e}")
 
     @classmethod
     def load(cls, state_file: Path) -> "State":
@@ -250,10 +255,24 @@ class State:
                     if hasattr(state, key) and key != "_state_file":
                         setattr(state, key, value)
             except json.JSONDecodeError as e:
-                print(f"Warning: Could not load state: {e}")
+                # Back up corrupted file before raising
+                backup_path = state_file.with_suffix('.bak')
+                try:
+                    import shutil
+                    shutil.copy2(state_file, backup_path)
+                    print(f"Warning: Corrupted state backed up to {backup_path}")
+                except OSError:
+                    pass
+                raise RuntimeError(f"Corrupted state file {state_file}: {e}") from e
             except KeyError as e:
-                print(f"Warning: Missing key in state: {e}")
-                raise
+                # Backup corrupted file before raising
+                bak_path = state_file.with_suffix('.key_error.bak')
+                try:
+                    import shutil
+                    shutil.copy2(state_file, bak_path)
+                except OSError:
+                    pass
+                raise RuntimeError(f"Invalid state file (backup at {bak_path}): missing key {e}") from e
         else:
             state.created_at = datetime.now().isoformat()
             state.save()
@@ -268,12 +287,15 @@ class State:
         return None
 
     def update_thread(self, thread_id: str, **kwargs):
-        """Update a thread and save state."""
-        for t in self.threads:
-            if t.get("id") == thread_id:
-                t.update(kwargs)
-                self.save()
+        """Update a thread and save state (lock protects read-modify-write)."""
+        with self._save_lock:
+            for t in self.threads:
+                if t.get("id") == thread_id:
+                    t.update(kwargs)
+                    break
+            else:
                 return
+            self.save()
 
     def add_followup(self, followup: dict):
         """Add a follow-up research item."""

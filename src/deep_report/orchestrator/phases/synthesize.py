@@ -485,6 +485,12 @@ def _assemble_report(report_file: Path, header_file: Path, parts: list[dict], co
         except (OSError, IOError) as e:
             ui.warning(f"Failed to read conclusion file: {e}")
 
+    # Check if we have actual content beyond just the header
+    has_header_only = len(sections) == 1 and header_file.exists()
+    if not sections or has_header_only:
+        ui.error("No content sections available for report assembly")
+        raise RuntimeError("No content sections available for report assembly")
+
     try:
         report_file.write_text("\n".join(sections))
     except (OSError, PermissionError) as e:
@@ -541,6 +547,26 @@ def _generate_audio(state: State, report_dir: Path):
     audio_file = report_dir / "report_audio.md"
 
     if not report_file.exists():
+        return
+
+    # Check file size before reading into memory
+    MAX_AUDIO_SIZE = 500 * 1024  # 500KB
+    try:
+        file_size = report_file.stat().st_size
+    except OSError as e:
+        ui.warning(f"Failed to stat report file: {e}")
+        return
+
+    if file_size > MAX_AUDIO_SIZE:
+        ui.warning(f"Report too large for single-read audio generation ({file_size // 1024}KB > {MAX_AUDIO_SIZE // 1024}KB)")
+        ui.info("Using streaming multi-pass audio generation")
+        # Read in chunks for multi-pass, which already handles large reports
+        try:
+            report_content = report_file.read_text()
+        except (OSError, IOError) as e:
+            ui.warning(f"Failed to read report for audio conversion: {e}")
+            return
+        _generate_audio_multi(state, report_dir, report_content)
         return
 
     # Check report size
@@ -662,7 +688,10 @@ CRITICAL: You MUST call Write tool with file_path="{part_file}" to save.
                 ui.warning(f"Failed to read audio part {i}: {e}")
 
     if audio_parts:
-        audio_file.write_text("\n\n---\n\n".join(audio_parts))
+        try:
+            audio_file.write_text("\n\n---\n\n".join(audio_parts))
+        except (OSError, PermissionError) as e:
+            ui.warning(f"Failed to write audio file: {e}")
 
     # Clean up temporary audio part files
     for temp_file in temp_files:

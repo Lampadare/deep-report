@@ -68,7 +68,7 @@ class BaseSource:
             try:
                 resp = requests.get(url, timeout=self.timeout, headers=headers, **kwargs)
                 if resp.status_code == 200:
-                    return resp
+                    return resp  # Caller must close the response after use
                 if resp.status_code == 429:  # Rate limit
                     time.sleep(5 * (attempt + 1))
                     continue
@@ -81,7 +81,6 @@ class BaseSource:
             except requests.exceptions.RequestException:
                 return None
             finally:
-                # Ensure response is closed properly
                 if resp is not None and resp.status_code != 200:
                     try:
                         resp.close()
@@ -121,20 +120,23 @@ class ArxivSource(BaseSource):
             if resp is None:
                 return PaperResult(False, error="Request failed", source=self.name)
 
-            if resp.status_code != 200:
-                return PaperResult(False, error=f"HTTP {resp.status_code}", source=self.name)
+            try:
+                if resp.status_code != 200:
+                    return PaperResult(False, error=f"HTTP {resp.status_code}", source=self.name)
 
-            content_type = resp.headers.get('content-type', '')
-            if 'pdf' not in content_type.lower() and len(resp.content) < 1000:
-                return PaperResult(False, error="Response not a PDF", source=self.name)
+                content_type = resp.headers.get('content-type', '')
+                if 'pdf' not in content_type.lower() and len(resp.content) < 1000:
+                    return PaperResult(False, error="Response not a PDF", source=self.name)
 
-            output_path.write_bytes(resp.content)
-            return PaperResult(
-                True,
-                filepath=output_path,
-                source=self.name,
-                size_bytes=len(resp.content)
-            )
+                output_path.write_bytes(resp.content)
+                return PaperResult(
+                    True,
+                    filepath=output_path,
+                    source=self.name,
+                    size_bytes=len(resp.content)
+                )
+            finally:
+                resp.close()
         except Exception as e:
             return PaperResult(False, error=str(e), source=self.name)
 
@@ -178,14 +180,17 @@ class PMCSource(BaseSource):
                 if resp is None:
                     continue
 
-                if resp.status_code == 200 and len(resp.content) > 1000:
-                    output_path.write_bytes(resp.content)
-                    return PaperResult(
-                        True,
-                        filepath=output_path,
-                        source=self.name,
-                        size_bytes=len(resp.content)
-                    )
+                try:
+                    if resp.status_code == 200 and len(resp.content) > 1000:
+                        output_path.write_bytes(resp.content)
+                        return PaperResult(
+                            True,
+                            filepath=output_path,
+                            source=self.name,
+                            size_bytes=len(resp.content)
+                        )
+                finally:
+                    resp.close()
             except Exception:
                 continue
 
@@ -228,22 +233,27 @@ class OpenAccessSource(BaseSource):
             # First, fetch the article page
             resp = self._get_with_retry(url)
             if resp is None or resp.status_code != 200:
+                if resp is not None:
+                    resp.close()
                 return PaperResult(False, error="Could not fetch article page", source=self.name)
 
-            # Look for PDF link patterns
-            pdf_patterns = [
-                r'href="([^"]+\.pdf[^"]*)"',
-                r'href="([^"]+/pdf/[^"]*)"',
-                r'data-pdf-url="([^"]+)"',
-                r'"pdfUrl"\s*:\s*"([^"]+)"',
-            ]
+            try:
+                # Look for PDF link patterns
+                pdf_patterns = [
+                    r'href="([^"]+\.pdf[^"]*)"',
+                    r'href="([^"]+/pdf/[^"]*)"',
+                    r'data-pdf-url="([^"]+)"',
+                    r'"pdfUrl"\s*:\s*"([^"]+)"',
+                ]
 
-            pdf_url = None
-            for pattern in pdf_patterns:
-                match = re.search(pattern, resp.text)
-                if match:
-                    pdf_url = match.group(1)
-                    break
+                pdf_url = None
+                for pattern in pdf_patterns:
+                    match = re.search(pattern, resp.text)
+                    if match:
+                        pdf_url = match.group(1)
+                        break
+            finally:
+                resp.close()
 
             if not pdf_url:
                 return PaperResult(False, error="No PDF link found on page", source=self.name)
@@ -263,31 +273,36 @@ class OpenAccessSource(BaseSource):
             # Download PDF
             pdf_resp = self._get_with_retry(pdf_url, allow_redirects=True)
             if pdf_resp is None or pdf_resp.status_code != 200:
+                if pdf_resp is not None:
+                    pdf_resp.close()
                 return PaperResult(False, error="PDF download failed", source=self.name)
 
-            # Validate final URL after following redirects (SSRF protection)
-            if hasattr(pdf_resp, 'url') and not self._is_allowed_domain(pdf_resp.url):
-                return PaperResult(False, error="PDF redirect to untrusted domain", source=self.name)
+            try:
+                # Validate final URL after following redirects (SSRF protection)
+                if hasattr(pdf_resp, 'url') and not self._is_allowed_domain(pdf_resp.url):
+                    return PaperResult(False, error="PDF redirect to untrusted domain", source=self.name)
 
-            # Generate filename from URL
-            from urllib.parse import unquote
-            parsed = urlparse(pdf_url)
-            filename = unquote(Path(parsed.path).name)
-            if not filename or filename == 'pdf':
-                # Generate from article URL
-                filename = self._safe_filename(Path(urlparse(url).path).stem) + '.pdf'
-            if not filename.endswith('.pdf'):
-                filename += '.pdf'
+                # Generate filename from URL
+                from urllib.parse import unquote
+                parsed = urlparse(pdf_url)
+                filename = unquote(Path(parsed.path).name)
+                if not filename or filename == 'pdf':
+                    # Generate from article URL
+                    filename = self._safe_filename(Path(urlparse(url).path).stem) + '.pdf'
+                if not filename.endswith('.pdf'):
+                    filename += '.pdf'
 
-            output_path = output_dir / filename
+                output_path = output_dir / filename
 
-            output_path.write_bytes(pdf_resp.content)
-            return PaperResult(
-                True,
-                filepath=output_path,
-                source=self.name,
-                size_bytes=len(pdf_resp.content)
-            )
+                output_path.write_bytes(pdf_resp.content)
+                return PaperResult(
+                    True,
+                    filepath=output_path,
+                    source=self.name,
+                    size_bytes=len(pdf_resp.content)
+                )
+            finally:
+                pdf_resp.close()
 
         except Exception as e:
             return PaperResult(False, error=str(e), source=self.name)
@@ -338,45 +353,56 @@ class DOISource(BaseSource):
             # Follow redirect to actual article
             resp = self._get_with_retry(doi_url, allow_redirects=True)
             if resp is None or resp.status_code != 200:
+                if resp is not None:
+                    resp.close()
                 return PaperResult(False, error="DOI redirect failed", source=self.name)
 
-            # Check if redirected to a known open-access source
-            final_url = resp.url
-            oa_source = OpenAccessSource()
-            if oa_source.can_handle(final_url):
-                return oa_source.download(final_url, output_dir)
+            try:
+                # Check if redirected to a known open-access source
+                final_url = resp.url
+                oa_source = OpenAccessSource()
+                if oa_source.can_handle(final_url):
+                    resp.close()
+                    return oa_source.download(final_url, output_dir)
 
-            # Try to find PDF on the page
-            pdf_patterns = [
-                r'href="([^"]+\.pdf[^"]*)"',
-                r'href="([^"]+/pdf/[^"]*)"',
-            ]
+                # Try to find PDF on the page
+                pdf_patterns = [
+                    r'href="([^"]+\.pdf[^"]*)"',
+                    r'href="([^"]+/pdf/[^"]*)"',
+                ]
 
-            for pattern in pdf_patterns:
-                match = re.search(pattern, resp.text)
-                if match:
-                    pdf_url = match.group(1)
-                    if not pdf_url.startswith('http'):
-                        pdf_url = urljoin(final_url, pdf_url)
+                for pattern in pdf_patterns:
+                    match = re.search(pattern, resp.text)
+                    if match:
+                        pdf_url = match.group(1)
+                        if not pdf_url.startswith('http'):
+                            pdf_url = urljoin(final_url, pdf_url)
 
-                    # Validate URL and domain
-                    if not pdf_url.startswith('http') or not self._is_allowed_domain(pdf_url):
-                        continue
+                        # Validate URL and domain
+                        if not pdf_url.startswith('http') or not self._is_allowed_domain(pdf_url):
+                            continue
 
-                    pdf_resp = self._get_with_retry(pdf_url, allow_redirects=True)
-                    # Validate final URL after redirects (SSRF protection)
-                    if pdf_resp and hasattr(pdf_resp, 'url') and not self._is_allowed_domain(pdf_resp.url):
-                        continue
-                    if pdf_resp and pdf_resp.status_code == 200 and len(pdf_resp.content) > 1000:
-                        safe_doi = self._safe_filename(doi)
-                        output_path = output_dir / f"doi_{safe_doi}.pdf"
-                        output_path.write_bytes(pdf_resp.content)
-                        return PaperResult(
-                            True,
-                            filepath=output_path,
-                            source=self.name,
-                            size_bytes=len(pdf_resp.content)
-                        )
+                        pdf_resp = self._get_with_retry(pdf_url, allow_redirects=True)
+                        if pdf_resp is None:
+                            continue
+                        try:
+                            # Validate final URL after redirects (SSRF protection)
+                            if hasattr(pdf_resp, 'url') and not self._is_allowed_domain(pdf_resp.url):
+                                continue
+                            if pdf_resp.status_code == 200 and len(pdf_resp.content) > 1000:
+                                safe_doi = self._safe_filename(doi)
+                                output_path = output_dir / f"doi_{safe_doi}.pdf"
+                                output_path.write_bytes(pdf_resp.content)
+                                return PaperResult(
+                                    True,
+                                    filepath=output_path,
+                                    source=self.name,
+                                    size_bytes=len(pdf_resp.content)
+                                )
+                        finally:
+                            pdf_resp.close()
+            finally:
+                resp.close()
 
             return PaperResult(False, error="Could not find open-access PDF", source=self.name)
 
@@ -416,18 +442,23 @@ class BiorxivSource(BaseSource):
         try:
             resp = self._get_with_retry(pdf_url, allow_redirects=True)
             if resp is None or resp.status_code != 200:
+                if resp is not None:
+                    resp.close()
                 return PaperResult(False, error=f"HTTP {resp.status_code if resp else 'None'}", source=self.name)
 
-            # Generate filename
-            safe_id = self._safe_filename(url.split('/content/')[-1].split('v')[0])
-            output_path = output_dir / f"biorxiv_{safe_id}.pdf"
+            try:
+                # Generate filename
+                safe_id = self._safe_filename(url.split('/content/')[-1].split('v')[0])
+                output_path = output_dir / f"biorxiv_{safe_id}.pdf"
 
-            output_path.write_bytes(resp.content)
-            return PaperResult(
-                True,
-                filepath=output_path,
-                source=self.name,
-                size_bytes=len(resp.content)
-            )
+                output_path.write_bytes(resp.content)
+                return PaperResult(
+                    True,
+                    filepath=output_path,
+                    source=self.name,
+                    size_bytes=len(resp.content)
+                )
+            finally:
+                resp.close()
         except Exception as e:
             return PaperResult(False, error=str(e), source=self.name)

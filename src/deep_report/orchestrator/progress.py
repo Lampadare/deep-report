@@ -63,7 +63,12 @@ class ProgressWriter:
         """Write to legacy log format for backwards compatibility."""
         try:
             with open(self.legacy_file, "a") as f:
-                f.write(f"[{self._elapsed()}] {line}\n")
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.write(f"[{self._elapsed()}] {line}\n")
+                    f.flush()
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         except OSError:
             pass
 

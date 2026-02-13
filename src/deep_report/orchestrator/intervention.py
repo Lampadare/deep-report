@@ -13,7 +13,6 @@ try:
     from rich.console import Console
     from rich.panel import Panel
     from rich.table import Table
-    from rich.prompt import Prompt
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
@@ -89,12 +88,7 @@ class InterventionHandler:
             console.print()
 
             try:
-                response = Prompt.ask(
-                    "[bold]Action?[/]",
-                    choices=["r", "s", "q", ""],
-                    default="r",
-                    show_choices=False
-                ).strip().lower()
+                response = console.input("[bold]Action?[/] (r): ").strip().lower()
             except EOFError:
                 console.print("\n[yellow]No input available, defaulting to skip[/]")
                 response = 's'
@@ -139,9 +133,7 @@ class InterventionHandler:
             return False
 
         # User wants to retry (r or Enter)
-        request["status"] = "retrying"
-        request["responded_at"] = datetime.now().isoformat()
-        # Remove file on retry to signal completion, no intermediate write needed
+        # Remove file on retry to signal completion
         self.intervention_file.unlink(missing_ok=True)
         return True
 

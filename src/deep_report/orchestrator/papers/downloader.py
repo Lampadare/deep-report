@@ -6,6 +6,7 @@ Coordinates downloading papers from multiple sources.
 
 import re
 import json
+import threading
 from pathlib import Path
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,9 +32,6 @@ class PaperDownloader:
             max_workers: Maximum concurrent downloads
         """
         self.output_dir = Path(output_dir).resolve()
-        # Validate output directory path
-        if not self.output_dir.parent.exists():
-            raise ValueError(f"Parent directory does not exist: {self.output_dir.parent}")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.max_workers = max_workers
 
@@ -47,6 +45,7 @@ class PaperDownloader:
         ]
 
         # Results tracking
+        self._results_lock = threading.Lock()
         self.results = {
             "downloaded": [],
             "failed": [],
@@ -188,21 +187,22 @@ class PaperDownloader:
 
     def _record_result(self, url: str, result: PaperResult):
         """Record a download result."""
-        if result.success:
-            self.results["downloaded"].append({
-                "url": url,
-                "file": str(result.filepath),
-                "source": result.source,
-                "size_bytes": result.size_bytes,
-            })
-        elif result.error and "no handler" in result.error.lower():
-            self.results["skipped"].append(url)
-        else:
-            self.results["failed"].append({
-                "url": url,
-                "error": result.error,
-                "source": result.source,
-            })
+        with self._results_lock:
+            if result.success:
+                self.results["downloaded"].append({
+                    "url": url,
+                    "file": str(result.filepath),
+                    "source": result.source,
+                    "size_bytes": result.size_bytes,
+                })
+            elif result.error and "no handler" in result.error.lower():
+                self.results["skipped"].append(url)
+            else:
+                self.results["failed"].append({
+                    "url": url,
+                    "error": result.error,
+                    "source": result.source,
+                })
 
     def _write_report(self):
         """Write a download report to the output directory."""

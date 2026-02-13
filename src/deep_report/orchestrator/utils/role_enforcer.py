@@ -59,8 +59,16 @@ class RoleEnforcer:
             path: Path to file to count words in
 
         Returns:
-            Word count, or 0 if file cannot be read
+            Word count, or 0 if file cannot be read or is binary
         """
+        try:
+            with open(path, 'rb') as f:
+                chunk = f.read(1024)
+                if b'\x00' in chunk:
+                    return 0
+        except (FileNotFoundError, OSError):
+            return 0
+
         count = 0
         try:
             with open(path, encoding="utf-8", errors="replace") as f:

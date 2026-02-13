@@ -10,9 +10,11 @@ This script tails the progress files and displays updates as they happen.
 Run this in a separate terminal while the orchestrator is running.
 """
 
+import os
 import sys
 import time
 import json
+import logging
 import argparse
 from pathlib import Path
 from datetime import datetime
@@ -173,6 +175,14 @@ def watch_jsonl(report_dir: Path, follow: bool = True, raw: bool = False):
     try:
         while True:
             try:
+                # Check for file truncation (e.g., new write replaced the file)
+                try:
+                    file_size = os.path.getsize(watch_file)
+                    if last_pos > file_size:
+                        last_pos = 0
+                except OSError:
+                    pass
+
                 with open(watch_file) as f:
                     f.seek(last_pos)
                     for line in f:
@@ -197,9 +207,8 @@ def watch_jsonl(report_dir: Path, follow: bool = True, raw: bool = False):
                 # File was deleted, wait and retry
                 time.sleep(1)
                 continue
-            except Exception:
-                # Handle other file errors
-                pass
+            except Exception as e:
+                logging.debug(f"watch_progress error: {e}")
             time.sleep(0.3)
     except KeyboardInterrupt:
         print("\n\nStopped watching.")

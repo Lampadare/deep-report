@@ -30,6 +30,7 @@ Options:
 """
 
 import argparse
+import re
 import signal
 import sys
 from pathlib import Path
@@ -288,6 +289,11 @@ def _prompt_seed_folder(cwd: Path) -> Optional[str]:
     return str(cwd / folder_name)
 
 
+def _word_boundary_match(signal: str, text: str) -> bool:
+    """Check if signal appears in text at word boundaries (avoids false positives)."""
+    return bool(re.search(r'\b' + re.escape(signal) + r'\b', text))
+
+
 def _analyze_topic_defaults(topic: str) -> dict:
     """Analyze topic to suggest smart defaults for report type and expertise."""
     t = topic.lower()
@@ -304,9 +310,9 @@ def _analyze_topic_defaults(topic: str) -> dict:
         "what is", "overview", "101", "primer", "guide for",
     ]
 
-    if any(s in t for s in expert_signals):
+    if any(_word_boundary_match(s, t) for s in expert_signals):
         expertise_default = 2  # expert
-    elif any(s in t for s in beginner_signals):
+    elif any(_word_boundary_match(s, t) for s in beginner_signals):
         expertise_default = 0  # beginner
     else:
         expertise_default = 1  # intermediate
@@ -316,11 +322,11 @@ def _analyze_topic_defaults(topic: str) -> dict:
     tutorial_signals = ["how to", "tutorial", "guide", "learn", "step by step"]
     survey_signals = ["survey", "landscape", "overview of", "review of"]
 
-    if any(s in t for s in comparison_signals):
+    if any(_word_boundary_match(s, t) for s in comparison_signals):
         report_type_default = 2  # comparison
-    elif any(s in t for s in tutorial_signals):
+    elif any(_word_boundary_match(s, t) for s in tutorial_signals):
         report_type_default = 1  # tutorial
-    elif any(s in t for s in survey_signals):
+    elif any(_word_boundary_match(s, t) for s in survey_signals):
         report_type_default = 3  # survey
     else:
         report_type_default = 0  # state-of-the-art
@@ -548,8 +554,14 @@ Examples:
                         help="Pause for approval before research and each iteration")
     parser.add_argument("--model", default="sonnet", choices=["sonnet", "opus"],
                         help="Model for research agents (default: sonnet)")
-    parser.add_argument("--agents", type=int, default=10,
-                        help="Number of research agents (default: 10, max: 30)")
+    def _validate_agents(value):
+        val = int(value)
+        if val < 1 or val > 50:
+            raise argparse.ArgumentTypeError(f"agents must be between 1 and 50, got {val}")
+        return val
+
+    parser.add_argument("--agents", type=_validate_agents, default=10,
+                        help="Number of research agents (default: 10, max: 50)")
     parser.add_argument("--refs", help="Seed references folder or comma-separated URLs")
     parser.add_argument("--download-papers", action="store_true",
                         help="Download cited open-access papers")
@@ -653,7 +665,7 @@ Examples:
             "agent_count": max(3, min(args.agents, 30)),
             "seed_urls": seed_urls,
             "seed_refs_folder": seed_folder,
-            "download_papers": True if not args.download_papers else args.download_papers,  # Default to True in quick mode
+            "download_papers": args.download_papers,  # False by default in quick mode; use --download-papers to enable
             "generate_audio": args.audio,
             "expertise_level": args.expertise,
             "report_type": args.report_type,
@@ -1028,6 +1040,12 @@ def resume_report(report_dir: Path, ctx: OrchestratorContext) -> int:
     target_phase = current_phase + 1
     ui.info(f"Last completed phase: {current_phase}")
     ui.info(f"Last step: {state.current_step}")
+
+    # Check if report is already complete
+    if current_phase >= 5:
+        ui.warning("This report is already fully completed (all 5 phases done)")
+        ui.info(f"Report location: {report_dir}")
+        return 0
 
     # Validate files exist for target phase
     valid, error = _validate_resume_files(state, target_phase)

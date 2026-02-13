@@ -56,7 +56,7 @@ class DeepReportUI:
 
     def __init__(self):
         if RICH_AVAILABLE:
-            self.console = Console()
+            self.console = Console(force_terminal=None)
         else:
             self.console = None
         self._progress = None
@@ -417,6 +417,15 @@ class DeepReportUI:
                     break
             else:
                 return  # No pending threads
+
+    def cleanup_thread_metadata(self):
+        """Clear thread metadata to free memory after a research phase."""
+        with self._status_lock:
+            self._threads = []
+            self._thread_status = {}
+            self._thread_times = {}
+            self._research_title = ""
+            self._spinner_frame = 0
 
     def research_table_complete(self):
         """Finalize and close the live table."""

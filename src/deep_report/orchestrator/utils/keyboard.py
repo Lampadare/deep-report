@@ -18,6 +18,7 @@ class KeyboardListener:
     def __init__(self, on_key: Callable[[str], None]):
         self.on_key = on_key
         self._running = False
+        self._started = False
         self._thread: Optional[threading.Thread] = None
         self._tty_fd: Optional[int] = None
         self._available = False
@@ -50,15 +51,19 @@ class KeyboardListener:
 
     def start(self):
         """Start listening for keyboard input in background thread."""
-        if not self._available or self._running:
+        if not self._available or self._started:
             return
 
+        self._started = True
         self._running = True
         self._thread = threading.Thread(target=self._listen, daemon=True)
         self._thread.start()
 
     def stop(self):
         """Stop the keyboard listener."""
+        if not self._started:
+            return
+        self._started = False
         self._running = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
@@ -118,16 +123,30 @@ class VerboseToggle:
     """Manages verbose mode toggle with keyboard listener."""
 
     def __init__(self, on_toggle: Optional[Callable[[bool], None]] = None):
-        self.enabled = False
+        self._enabled = threading.Event()
         self._on_toggle = on_toggle
         self._listener: Optional[KeyboardListener] = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled.is_set()
+
+    @enabled.setter
+    def enabled(self, value: bool):
+        if value:
+            self._enabled.set()
+        else:
+            self._enabled.clear()
 
     def _handle_key(self, ch: str):
         """Handle key press - toggle on 'v' or 'V'."""
         if ch.lower() == 'v':
-            self.enabled = not self.enabled
+            if self._enabled.is_set():
+                self._enabled.clear()
+            else:
+                self._enabled.set()
             if self._on_toggle:
-                self._on_toggle(self.enabled)
+                self._on_toggle(self._enabled.is_set())
 
     def start(self):
         """Start listening for toggle key."""

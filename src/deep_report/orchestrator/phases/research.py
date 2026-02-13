@@ -48,7 +48,7 @@ def run_research(
     # Get seed context for prompts
     seed_context = _gather_seed_context(report_dir)
 
-    iteration = 0
+    iteration = state.research_iteration  # Resume from saved iteration
     max_iterations = state.max_iterations
 
     # APPROVAL GATE: Before first research run
@@ -101,8 +101,11 @@ def run_research(
             else:
                 if thread_id.startswith("followup_"):
                     _mark_followup_failed(state, thread_id, result.error)
+                    if thread_id not in state.failed_threads:
+                        state.failed_threads.append(thread_id)
                 else:
-                    state.failed_threads.append(thread_id)
+                    if thread_id not in state.failed_threads:
+                        state.failed_threads.append(thread_id)
                     state.update_thread(thread_id, status="failed")
                 ui.warning(f"Thread {thread_id} failed: {result.error[:80]}")
                 if progress:

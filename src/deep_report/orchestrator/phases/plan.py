@@ -153,6 +153,20 @@ Generate exactly {state.agent_count} threads.
         ui.error("Plan has no research threads")
         return None
 
+    REQUIRED_THREAD_KEYS = {"id", "title", "objective"}
+    valid_threads = []
+    for t in threads:
+        if REQUIRED_THREAD_KEYS.issubset(t.keys()):
+            valid_threads.append(t)
+        else:
+            missing = REQUIRED_THREAD_KEYS - t.keys()
+            ui.warning(f"Dropping malformed thread (missing {missing})")
+    threads = valid_threads
+    if not threads:
+        ui.error("No valid research threads in plan")
+        return None
+
+    plan["threads"] = threads
     plan["estimated_cost"] = _estimate_cost(state, len(threads))
     return plan
 

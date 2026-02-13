@@ -154,7 +154,7 @@ class ProcessTracker:
 
     def __init__(self):
         self._processes: dict[int, subprocess.Popen] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._shutting_down = False
 
     def register(self, proc: subprocess.Popen):
@@ -172,10 +172,14 @@ class ProcessTracker:
     def shutdown(self, timeout: float = 10.0):
         """SIGTERM all tracked processes, wait, then SIGKILL survivors."""
         import signal as _signal
-        with self._lock:
+        acquired = self._lock.acquire(timeout=1)
+        try:
             self._shutting_down = True
             pids = list(self._processes.keys())
             procs = list(self._processes.values())
+        finally:
+            if acquired:
+                self._lock.release()
 
         for pid in pids:
             try:
@@ -197,8 +201,12 @@ class ProcessTracker:
             except (OSError, ProcessLookupError):
                 pass
 
-        with self._lock:
+        acquired = self._lock.acquire(timeout=1)
+        try:
             self._processes.clear()
+        finally:
+            if acquired:
+                self._lock.release()
 
 
 process_tracker = ProcessTracker()
@@ -282,7 +290,6 @@ def spawn_agent(
             start_new_session=True,  # Create new process group for clean termination
         )
         process_tracker.register(process)
-
         try:
             stdout, stderr = process.communicate(input=prompt, timeout=timeout_secs)
         except subprocess.TimeoutExpired:
@@ -293,16 +300,19 @@ def spawn_agent(
             except (OSError, ProcessLookupError):
                 # Fallback if process group kill fails
                 process.kill()
-            process.wait()
-            process_tracker.unregister(process.pid)
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
             return AgentResult(
                 success=False,
                 output="",
                 error=f"Agent timed out after {timeout_secs}s",
                 duration_secs=timeout_secs
             )
+        finally:
+            process_tracker.unregister(process.pid)
 
-        process_tracker.unregister(process.pid)
         duration = time.time() - start
 
         if process.returncode == 0:
@@ -449,22 +459,25 @@ def spawn_agents_parallel(
         futures = {}
 
         for task in tasks:
-            # Check circuit breaker before submitting (atomic check right before submit)
-            cb.wait_if_needed()
-            if not cb.should_proceed():
+            # Atomic circuit breaker check: wait_if_needed waits and returns proceed status
+            if not cb.wait_if_needed():
                 continue
 
             # Use retry wrapper for reliability
-            future = pool.submit(
-                spawn_agent_with_retry,
-                prompt=task["prompt"],
-                model=task.get("model", "sonnet"),
-                output_file=Path(task["output_file"]) if task.get("output_file") else None,
-                timeout_secs=task.get("timeout_secs", DEFAULT_TIMEOUT),
-                cwd=Path(task["cwd"]) if task.get("cwd") else None,
-                max_retries=task.get("max_retries", 3),
-                allowed_tools=task.get("allowed_tools"),
-            )
+            try:
+                future = pool.submit(
+                    spawn_agent_with_retry,
+                    prompt=task["prompt"],
+                    model=task.get("model", "sonnet"),
+                    output_file=Path(task["output_file"]) if task.get("output_file") else None,
+                    timeout_secs=task.get("timeout_secs", DEFAULT_TIMEOUT),
+                    cwd=Path(task["cwd"]) if task.get("cwd") else None,
+                    max_retries=task.get("max_retries", 3),
+                    allowed_tools=task.get("allowed_tools"),
+                )
+            except RuntimeError:
+                # Pool is shutting down
+                break
             futures[future] = task["id"]
 
         for future in as_completed(futures):

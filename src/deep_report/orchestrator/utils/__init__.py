@@ -19,19 +19,33 @@ from .role_enforcer import RoleEnforcer
 
 
 def extract_json(text: str) -> dict | None:
-    """Extract first JSON object from text.
-
-    Args:
-        text: Text that may contain a JSON object
-
-    Returns:
-        Parsed JSON dict or None if not found/invalid
-    """
+    """Extract first JSON object from text using brace counting."""
     start = text.find("{")
-    end = text.rfind("}") + 1
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start:end])
-        except json.JSONDecodeError:
-            return None
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if escape:
+            escape = False
+            continue
+        if c == '\\' and in_string:
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    return None
     return None

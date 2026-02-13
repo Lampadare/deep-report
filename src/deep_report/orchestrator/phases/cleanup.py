@@ -50,12 +50,15 @@ def _calculate_metrics(state: State, report_dir: Path) -> dict:
         "completed_at": datetime.now().isoformat(),
     }
 
-    # Count words in report
+    # Count words in report (streaming to avoid loading full content)
     report_file = report_dir / "report.md"
     if report_file.exists():
         try:
-            content = report_file.read_text()
-            metrics["report_word_count"] = len(content.split())
+            word_count = 0
+            with open(report_file) as f:
+                for line in f:
+                    word_count += len(line.split())
+            metrics["report_word_count"] = word_count
         except (OSError, IOError) as e:
             ui.warning(f"Failed to read report for metrics: {e}")
             metrics["report_word_count"] = 0
