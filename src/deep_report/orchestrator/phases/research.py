@@ -256,9 +256,9 @@ def _run_research_batch(
     # Safe defaults: opus→3 concurrent, sonnet→8 concurrent.
     model = state.research_model
     if model == "opus":
-        max_workers = min(len(tasks), 3)
+        max_workers = min(len(tasks), 2)
     else:
-        max_workers = min(len(tasks), 8)
+        max_workers = min(len(tasks), 5)
     concurrent_note = f" — {max_workers} concurrent" if len(tasks) > max_workers else ""
     ui.research_table_start(thread_info, title=f"RESEARCH AGENTS (Iteration {iteration}){concurrent_note}")
 
