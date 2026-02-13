@@ -5,10 +5,11 @@ Provides colored output, progress bars, spinners, and formatted panels.
 Falls back gracefully if Rich is not installed.
 """
 
-from typing import Optional
 from contextlib import contextmanager
+from dataclasses import dataclass
 import logging
 import sys
+import time
 
 # Try to import Rich, fall back to plain text if not available
 try:
@@ -26,8 +27,21 @@ except ImportError:
     ROUNDED = None
 
 
-# Phase colors and icons for visual distinction
-PHASE_COLORS = ["cyan", "blue", "magenta", "green", "yellow"]
+@dataclass(frozen=True)
+class Theme:
+    accent: str = "cyan"
+    success: str = "green"
+    warning: str = "yellow"
+    error: str = "red"
+    dim: str = "dim"
+    info: str = "cyan"
+    heading: str = "bold white"
+    phase_colors: tuple = ("cyan", "blue", "magenta", "green", "yellow")
+    border: str = "cyan"
+
+theme = Theme()
+
+
 SPINNER_CHARS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 PHASE_ICONS = {
     1: "🔧",  # Setup
@@ -77,6 +91,11 @@ class DeepReportUI:
         # Thread safety for _thread_status (RLock for reentrant access from Live refresh)
         import threading
         self._status_lock = threading.RLock()
+        # Phase timing
+        self._phase_start_time = None
+        self._session_start_time = None
+        # ETA tracking
+        self._agent_durations = []
 
     def set_verbose(self, enabled: bool):
         """Enable or disable verbose mode."""
@@ -93,9 +112,9 @@ class DeepReportUI:
             return
         if RICH_AVAILABLE:
             if self._research_live and getattr(self._research_live, 'is_started', False):
-                self._research_live.console.print(f"[dim]{message}[/]")
+                self._research_live.console.print(f"[{theme.dim}]{message}[/]")
             else:
-                self.console.print(f"[dim]{message}[/]")
+                self.console.print(f"[{theme.dim}]{message}[/]")
         else:
             print(f"  [V] {message}")
 
@@ -131,14 +150,20 @@ class DeepReportUI:
             plain = re.sub(r'\[/?[^\]]+\]', '', message)
             print(plain)
 
+    def _update_title(self, text: str):
+        """Update terminal window title."""
+        if sys.stdout.isatty():
+            sys.stdout.write(f"\033]0;{text}\007")
+            sys.stdout.flush()
+
     def header(self, title: str, subtitle: str = ""):
         """Print a styled header."""
         display_title = self._truncate(title, 80)
         if RICH_AVAILABLE:
             self.console.print()
             self.console.print(Panel(
-                f"[bold white]{display_title}[/]\n{subtitle}" if subtitle else f"[bold white]{display_title}[/]",
-                border_style="cyan",
+                f"[{theme.heading}]{display_title}[/]\n{subtitle}" if subtitle else f"[{theme.heading}]{display_title}[/]",
+                border_style=theme.border,
                 padding=(0, 2)
             ))
         else:
@@ -153,14 +178,19 @@ class DeepReportUI:
         """Show colorful banner for configure mode."""
         if RICH_AVAILABLE:
             if sys.stdout.isatty():
-                self.console.clear()  # Start with clean slate
-            self.console.print()  # Top padding
-            title = Text("🔬 DEEP REPORT CONFIGURATION", style="bold white")
+                self.console.clear()
+            self.console.print()
+            # Minimal branding
+            self.console.print(f"[bold {theme.accent}]  ╔═══════════════════╗[/]")
+            self.console.print(f"[bold {theme.accent}]  ║   DEEP  REPORT    ║[/]")
+            self.console.print(f"[bold {theme.accent}]  ╚═══════════════════╝[/]")
+            self.console.print()
+            title = Text("🔬 DEEP REPORT CONFIGURATION", style=theme.heading)
             self.console.print(Panel(
                 title,
-                border_style="cyan",
+                border_style=theme.border,
                 padding=(0, 2),
-                subtitle="[dim]Use ↑↓ arrows to navigate, Enter to select[/]"
+                subtitle=f"[{theme.dim}]Use ↑↓ arrows to navigate, Enter to select[/]"
             ))
         else:
             print("=" * 60)
@@ -172,9 +202,9 @@ class DeepReportUI:
         """Print a subtle section divider."""
         if RICH_AVAILABLE:
             if label:
-                self.console.print(f"\n[dim]─── {label} ───[/]\n")
+                self.console.print(f"\n[{theme.dim}]─── {label} ───[/]\n")
             else:
-                self.console.print()  # Just spacing
+                self.console.print()
         else:
             if label:
                 print(f"\n--- {label} ---\n")
@@ -183,9 +213,15 @@ class DeepReportUI:
 
     def phase_start(self, phase: int, name: str):
         """Announce phase start with colorful styling."""
+        if self._session_start_time is None:
+            self._session_start_time = time.time()
+        self._phase_start_time = time.time()
+
         icon = PHASE_ICONS.get(phase, "▶")
+        self._update_title(f"deep-report: Phase {phase}/5 — {name}")
+
         if RICH_AVAILABLE:
-            color = PHASE_COLORS[(phase - 1) % len(PHASE_COLORS)]
+            color = theme.phase_colors[(phase - 1) % len(theme.phase_colors)]
             self.console.print()
             self.console.print(f"[bold {color}]{'━' * 3} {icon} PHASE {phase}: {name.upper()} {'━' * 3}[/]")
         else:
@@ -194,55 +230,93 @@ class DeepReportUI:
 
     def phase_complete(self, phase: int, name: str):
         """Announce phase completion."""
+        elapsed = ""
+        if self._phase_start_time:
+            secs = time.time() - self._phase_start_time
+            if secs >= 60:
+                elapsed = f" ({int(secs // 60)}m {int(secs % 60)}s)"
+            else:
+                elapsed = f" ({int(secs)}s)"
+
         if RICH_AVAILABLE:
-            self.console.print(f"[bold green]✓[/] Phase {phase} ({name}) complete")
+            self.console.rule(style=theme.dim)
+            self.console.print(f"[bold {theme.success}]✓[/] Phase {phase} ({name}) complete{elapsed}")
         else:
-            print(f"[OK] Phase {phase} ({name}) complete")
+            print(f"--- Phase {phase} ({name}) complete{elapsed} ---")
+
+        if phase == 5:
+            self._update_title("deep-report: Complete")
+
+    def phase_bar(self, completed_phase: int, total: int = 5):
+        """Show persistent phase progress bar."""
+        PHASE_NAMES = ["Setup", "Plan", "Research", "Synthesize", "Cleanup"]
+
+        if RICH_AVAILABLE:
+            parts = []
+            for i, name in enumerate(PHASE_NAMES[:total], 1):
+                if i <= completed_phase:
+                    parts.append(f"[bold {theme.success}]✓ {name}[/]")
+                elif i == completed_phase + 1:
+                    parts.append(f"[bold {theme.accent}]▶ {name}[/]")
+                else:
+                    parts.append(f"[{theme.dim}]○ {name}[/]")
+            bar = " → ".join(parts)
+            self.console.print(f"\n{bar}\n")
+        else:
+            parts = []
+            for i, name in enumerate(PHASE_NAMES[:total], 1):
+                if i <= completed_phase:
+                    parts.append(f"[✓ {name}]")
+                elif i == completed_phase + 1:
+                    parts.append(f"[> {name}]")
+                else:
+                    parts.append(f"[  {name}]")
+            print(" → ".join(parts))
 
     def step(self, message: str):
         """Print a step message."""
         if RICH_AVAILABLE:
-            self.console.print(f"  [cyan]→[/] {message}")
+            self.console.print(f"  [{theme.accent}]→[/] {message}")
         else:
             print(f"  -> {message}")
 
     def success(self, message: str):
         """Print a success message."""
         if RICH_AVAILABLE:
-            self.console.print(f"[bold green]✓[/] {message}")
+            self.console.print(f"[bold {theme.success}]✓[/] {message}")
         else:
             print(f"[OK] {message}")
 
     def warning(self, message: str):
         """Print a warning message."""
         if RICH_AVAILABLE:
-            self.console.print(f"[bold yellow]⚠[/] {message}")
+            self.console.print(f"[bold {theme.warning}]⚠[/] {message}")
         else:
             print(f"[WARN] {message}")
 
     def error(self, message: str):
         """Print an error message."""
         if RICH_AVAILABLE:
-            self.console.print(f"[bold red]✗ ERROR:[/] {message}")
+            self.console.print(f"[bold {theme.error}]✗ ERROR:[/] {message}")
         else:
             print(f"ERROR: {message}")
 
     def info(self, message: str):
         """Print an info message."""
         if RICH_AVAILABLE:
-            self.console.print(f"[cyan]ℹ[/] {message}")
+            self.console.print(f"[{theme.info}]ℹ[/] {message}")
         else:
             print(f"[INFO] {message}")
 
     def intervention(self, issue: str, details: dict):
         """Show an intervention required panel."""
         if RICH_AVAILABLE:
-            content = f"[red bold]{issue}[/]\n\n"
+            content = f"[{theme.error} bold]{issue}[/]\n\n"
             content += "\n".join(f"  {k}: {v}" for k, v in details.items())
             self.console.print(Panel(
                 content,
                 title="⚠️  INTERVENTION REQUIRED",
-                border_style="red"
+                border_style=theme.error
             ))
         else:
             print()
@@ -256,8 +330,8 @@ class DeepReportUI:
         """Display configuration summary as a table."""
         if RICH_AVAILABLE:
             table = Table(show_header=False, box=None, padding=(0, 2))
-            table.add_column("Key", style="dim cyan")
-            table.add_column("Value", style="bold white")
+            table.add_column("Key", style=f"{theme.dim} {theme.accent}")
+            table.add_column("Value", style=theme.heading)
             for key, value in config.items():
                 if not key.startswith("_"):
                     display_value = self._truncate(str(value), 60)
@@ -273,7 +347,7 @@ class DeepReportUI:
     def show_loading(self, message: str):
         """Show animated spinner during loading."""
         if RICH_AVAILABLE:
-            spinner = Spinner("dots", text=f"[cyan]{message}[/]")
+            spinner = Spinner("dots", text=f"[{theme.accent}]{message}[/]")
             with Live(spinner, console=self.console, refresh_per_second=10, transient=True):
                 yield
         else:
@@ -285,11 +359,11 @@ class DeepReportUI:
         if RICH_AVAILABLE:
             try:
                 self._progress = Progress(
-                    SpinnerColumn("dots", style="cyan"),
-                    TextColumn("[bold blue]{task.description}[/]"),
-                    BarColumn(complete_style="green", finished_style="bold green"),
+                    SpinnerColumn("dots", style=theme.accent),
+                    TextColumn(f"[bold {theme.accent}]{{task.description}}[/]"),
+                    BarColumn(complete_style=theme.success, finished_style=f"bold {theme.success}"),
                     TaskProgressColumn(),
-                    TextColumn("[dim cyan]{task.fields[status]}[/]"),
+                    TextColumn(f"[{theme.dim} {theme.accent}]{{task.fields[status]}}[/]"),
                     console=self.console,
                     transient=False,
                 )
@@ -297,7 +371,6 @@ class DeepReportUI:
                 self._live.start()
                 self._task_id = self._progress.add_task(description, total=total, status="starting...")
             except Exception:
-                # Fallback to plain mode on error
                 print(f"{description} (0/{total})...")
                 self._plain_total = total
                 self._plain_completed = 0
@@ -332,7 +405,7 @@ class DeepReportUI:
     def spinner_task(self, message: str):
         """Show spinner during a single long task."""
         if RICH_AVAILABLE:
-            with self.console.status(f"[cyan]{message}[/]", spinner="dots"):
+            with self.console.status(f"[{theme.accent}]{message}[/]", spinner="dots"):
                 yield
         else:
             print(f"  {message}...")
@@ -362,7 +435,6 @@ class DeepReportUI:
             )
             self._research_live.start()
         except Exception:
-            # Fallback to plain mode on error
             print(f"\n{title}")
 
     def _build_research_table(self):
@@ -382,29 +454,45 @@ class DeepReportUI:
                 status = self._thread_status.get(tid, "pending")
 
                 if status == "pending":
-                    status_text = "[dim]○ Pending[/]"
+                    status_text = f"[{theme.dim}]○ Pending[/]"
                 elif status == "running":
-                    status_text = f"[cyan]{char} Running...[/]"
+                    status_text = f"[{theme.accent}]{char} Running...[/]"
                 elif status == "complete":
                     time_str = f" ({self._thread_times.get(tid, 0):.0f}s)" if tid in self._thread_times else ""
-                    status_text = f"[green]✓ Complete{time_str}[/]"
+                    status_text = f"[{theme.success}]✓ Complete{time_str}[/]"
                 elif status == "failed":
-                    status_text = "[red]✗ Failed[/]"
+                    status_text = f"[{theme.error}]✗ Failed[/]"
                 else:
-                    status_text = f"[dim]{status}[/]"
+                    status_text = f"[{theme.dim}]{status}[/]"
 
                 table.add_row(str(i), title, status_text)
 
             complete = sum(1 for s in self._thread_status.values() if s == "complete")
             failed = sum(1 for s in self._thread_status.values() if s == "failed")
+            running = sum(1 for s in self._thread_status.values() if s == "running")
             total = len(self._threads)
+            pct = int(complete / total * 100) if total else 0
+            durations_snapshot = list(self._agent_durations)
+            research_title = self._research_title
 
-        summary = f"Progress: {complete}/{total} complete"
+        summary = f"Progress: {complete}/{total} ({pct}%)"
+
+        # ETA from rolling average
+        if durations_snapshot and complete < total:
+            avg = sum(durations_snapshot) / len(durations_snapshot)
+            remaining = total - complete - failed
+            parallel = max(running, 1)
+            eta_secs = (remaining / parallel) * avg
+            if eta_secs >= 60:
+                summary += f" | ETA: ~{int(eta_secs // 60)}m {int(eta_secs % 60)}s"
+            else:
+                summary += f" | ETA: ~{int(eta_secs)}s"
+
         if failed:
-            summary += f" | [red]✗ {failed} failed[/]"
+            summary += f" | [{theme.error}]✗ {failed} failed[/]"
 
-        return Panel(table, title=f"[bold]🔬 {self._research_title}[/]",
-                     subtitle=summary, border_style="blue")
+        return Panel(table, title=f"[bold]🔬 {research_title}[/]",
+                     subtitle=summary, border_style=theme.border)
 
     def research_table_update(self, thread_id: str, status: str, duration: float = 0):
         """Update a thread's status."""
@@ -412,6 +500,8 @@ class DeepReportUI:
             self._thread_status[thread_id] = status
             if duration:
                 self._thread_times[thread_id] = duration
+            if status == "complete" and duration:
+                self._agent_durations.append(duration)
 
         # Live auto-refreshes via _SpinnerTable, but force an update for immediate feedback
         if RICH_AVAILABLE and self._research_live:
@@ -431,7 +521,7 @@ class DeepReportUI:
                     self._thread_status[tid] = "running"
                     break
             else:
-                return  # No pending threads
+                return
 
     def cleanup_thread_metadata(self):
         """Clear thread metadata to free memory after a research phase."""
@@ -441,6 +531,7 @@ class DeepReportUI:
             self._thread_times = {}
             self._research_title = ""
             self._spinner_frame = 0
+            self._agent_durations = []
 
     def research_table_complete(self):
         """Finalize and close the live table. Safe to call multiple times."""
@@ -487,9 +578,9 @@ class DeepReportUI:
     def decision(self, iteration: int, sufficient: bool, reasoning: str):
         """Display decision agent result."""
         if RICH_AVAILABLE:
-            status = "[bold green]SUFFICIENT[/]" if sufficient else "[bold yellow]NEEDS MORE[/]"
+            status = f"[bold {theme.success}]SUFFICIENT[/]" if sufficient else f"[bold {theme.warning}]NEEDS MORE[/]"
             self.console.print(f"\n[bold]Decision (iteration {iteration}):[/] {status}")
-            self.console.print(f"  [dim]{reasoning}[/]")
+            self.console.print(f"  [{theme.dim}]{reasoning}[/]")
         else:
             status = "SUFFICIENT" if sufficient else "NEEDS MORE"
             print(f"\nDecision (iteration {iteration}): {status}")
@@ -499,7 +590,7 @@ class DeepReportUI:
         """Display research plan threads in a table."""
         if RICH_AVAILABLE:
             table = Table(show_header=True, box=ROUNDED)
-            table.add_column("#", width=4, justify="right", style="dim")
+            table.add_column("#", width=4, justify="right", style=theme.dim)
             table.add_column("Title", width=30)
             table.add_column("Objective", width=44)
 
@@ -512,7 +603,7 @@ class DeepReportUI:
             self.console.print(Panel(
                 table,
                 title="[bold]📋 RESEARCH PLAN[/]",
-                border_style="blue"
+                border_style=theme.border
             ))
         else:
             print("\n=== RESEARCH PLAN ===")
@@ -525,20 +616,38 @@ class DeepReportUI:
 
     def final_summary(self, report_dir: str, stats: dict):
         """Display final report summary."""
+        elapsed = ""
+        if self._session_start_time:
+            secs = time.time() - self._session_start_time
+            if secs >= 3600:
+                elapsed = f"{int(secs // 3600)}h {int((secs % 3600) // 60)}m"
+            elif secs >= 60:
+                elapsed = f"{int(secs // 60)}m {int(secs % 60)}s"
+            else:
+                elapsed = f"{int(secs)}s"
+
         if RICH_AVAILABLE:
             self.console.print()
+            content = f"[bold {theme.success}]Report generation complete![/]\n\n"
+            content += f"[bold]📄 Report:[/] {report_dir}/report.md\n"
+            content += f"[bold]📁 Directory:[/] {report_dir}\n"
+            if elapsed:
+                content += f"[bold]⏱  Total time:[/] {elapsed}\n"
+            content += "\n"
+            content += "\n".join(f"[{theme.dim}]{k}:[/] {v}" for k, v in stats.items())
             self.console.print(Panel(
-                f"[bold green]REPORT COMPLETE[/]\n\n"
-                f"[bold]Location:[/] {report_dir}\n"
-                f"[bold]Report:[/] {report_dir}/report.md\n\n"
-                + "\n".join(f"[dim]{k}:[/] {v}" for k, v in stats.items()),
-                border_style="green",
-                title="✨ Success"
+                content,
+                border_style=theme.success,
+                title="✨ Success",
+                padding=(1, 2)
             ))
+            self._update_title("deep-report: Complete ✓")
         else:
             print()
             print("=" * 60)
             print("REPORT COMPLETE")
+            if elapsed:
+                print(f"Total time: {elapsed}")
             print("=" * 60)
             print(f"Location: {report_dir}")
             print(f"Report: {report_dir}/report.md")
@@ -562,16 +671,14 @@ class DeepReportUI:
         if RICH_AVAILABLE:
             from rich.box import ROUNDED
 
-            # Build table
             table = Table(show_header=True, box=ROUNDED)
-            table.add_column("#", style="dim", width=3)
-            table.add_column("Topic", style="cyan")
+            table.add_column("#", style=theme.dim, width=3)
+            table.add_column("Topic", style=theme.accent)
             table.add_column("Phase", justify="center")
-            table.add_column("Step", style="dim")
-            table.add_column("Last Updated", style="dim")
+            table.add_column("Step", style=theme.dim)
+            table.add_column("Last Updated", style=theme.dim)
 
             for i, report in enumerate(reports, 1):
-                # Parse ISO timestamp
                 updated = datetime.fromisoformat(report["updated_at"])
                 time_ago = _format_time_ago(updated)
 
@@ -584,7 +691,7 @@ class DeepReportUI:
                 )
 
             self.console.print()
-            self.console.print(Panel(table, title="[bold]📋 Unfinished Reports[/]", border_style="blue"))
+            self.console.print(Panel(table, title="[bold]📋 Unfinished Reports[/]", border_style=theme.border))
         else:
             print()
             print("=== Unfinished Reports ===")
@@ -594,7 +701,6 @@ class DeepReportUI:
                 print(f"  [{i}] {report['topic'][:40]} - Phase {report['phase']}/5 - {time_ago}")
             print()
 
-        # Use questionary to pick if available
         try:
             import questionary
 
@@ -604,7 +710,7 @@ class DeepReportUI:
             result = questionary.select(
                 "Select report to resume:",
                 choices=choices,
-                style=self._picker_style("cyan")
+                style=self._picker_style(theme.accent)
             ).ask()
 
             if result == "Cancel" or result is None:
@@ -614,7 +720,6 @@ class DeepReportUI:
             return Path(reports[idx]["path"])
 
         except ImportError:
-            # Fallback to simple input
             while True:
                 try:
                     choice = input(f"Select report (1-{len(reports)}, or 'q' to cancel): ").strip()
@@ -646,18 +751,17 @@ class DeepReportUI:
         if RICH_AVAILABLE:
             from rich.box import ROUNDED
 
-            # Build table
             table = Table(show_header=True, box=ROUNDED)
-            table.add_column("#", style="dim", width=3)
-            table.add_column("Topic", style="cyan")
+            table.add_column("#", style=theme.dim, width=3)
+            table.add_column("Topic", style=theme.accent)
             table.add_column("Phase", justify="center")
-            table.add_column("Status", style="dim")
-            table.add_column("Last Updated", style="dim")
+            table.add_column("Status", style=theme.dim)
+            table.add_column("Last Updated", style=theme.dim)
 
             for i, report in enumerate(reports, 1):
                 updated = datetime.fromisoformat(report["updated_at"])
                 time_ago = _format_time_ago(updated)
-                status = "[green]Complete[/]" if report.get("complete") else "[yellow]In Progress[/]"
+                status = f"[{theme.success}]Complete[/]" if report.get("complete") else f"[{theme.warning}]In Progress[/]"
 
                 table.add_row(
                     str(i),
@@ -668,7 +772,7 @@ class DeepReportUI:
                 )
 
             self.console.print()
-            self.console.print(Panel(table, title="[bold]🗑️  Delete Report from Registry[/]", border_style="red"))
+            self.console.print(Panel(table, title="[bold]🗑️  Delete Report from Registry[/]", border_style=theme.error))
         else:
             print()
             print("=== Delete Report from Registry ===")
@@ -679,7 +783,6 @@ class DeepReportUI:
                 print(f"  [{i}] {report['topic'][:40]} - Phase {report['phase']}/5 - {status} - {time_ago}")
             print()
 
-        # Use questionary to pick
         try:
             import questionary
 
@@ -689,7 +792,7 @@ class DeepReportUI:
             result = questionary.select(
                 "Select report to DELETE from registry:",
                 choices=choices,
-                style=self._picker_style("red")
+                style=self._picker_style(theme.error)
             ).ask()
 
             if result == "Cancel" or result is None:
@@ -718,7 +821,6 @@ def _format_time_ago(dt) -> str:
     """Format datetime as '2 hours ago' style string."""
     from datetime import datetime, timezone
 
-    # Use timezone-aware datetime for consistency
     now = datetime.now(timezone.utc) if dt.tzinfo else datetime.now()
     diff = now - dt
     seconds = diff.total_seconds()

@@ -243,6 +243,7 @@ def _run_research_batch(
 
         tasks.append({
             "id": thread_id,
+            "title": title,
             "prompt": prompt,
             "model": state.research_model,
             "output_file": str(output_file),
@@ -436,6 +437,7 @@ CRITICAL: You MUST call Write tool with file_path="{summary_file}" to save your 
 
         tasks.append({
             "id": thread_id,
+            "title": thread_id,
             "prompt": prompt,
             "model": "sonnet",
             "output_file": str(summary_file),

@@ -51,7 +51,37 @@ def run_plan(state: State) -> bool:
     state.plan_written = True
     state.save()
 
-    ui.plan_summary(state.threads)
+    # Display plan as Rich Tree
+    try:
+        from rich.tree import Tree
+        from rich.panel import Panel
+
+        tree = Tree(f"[bold]📋 Research Plan[/] — {len(state.threads)} threads", guide_style="blue")
+        for i, thread in enumerate(state.threads, 1):
+            title = thread.get("title", thread.get("id", f"Thread {i}"))
+            branch = tree.add(f"[bold cyan]{i}. {title}[/]")
+            objective = thread.get("objective", "")
+            if objective:
+                branch.add(f"[dim]{objective}[/]")
+            questions = thread.get("questions", [])
+            if questions:
+                q_branch = branch.add("[dim]Questions[/]")
+                for q in questions[:3]:  # Show max 3 questions
+                    q_branch.add(f"[dim]• {q}[/]")
+
+        ui.console.print()
+        ui.console.print(Panel(tree, border_style="blue"))
+    except ImportError:
+        # Fallback to existing table display
+        ui.plan_summary(state.threads)
+
+    # Display coverage notes and gaps if available
+    coverage = plan.get("coverage_notes", "")
+    if coverage:
+        ui.info(f"Coverage: {coverage}")
+    gaps = plan.get("potential_gaps", [])
+    if gaps:
+        ui.info(f"Potential gaps: {', '.join(gaps[:3])}")
 
     # Write plan to file
     plan_file = report_dir / "state" / "plan.md"

@@ -38,10 +38,12 @@ from typing import Optional
 
 try:
     import questionary
-    from questionary import Style
+    from questionary import Style, Choice
     QUESTIONARY_AVAILABLE = True
 except ImportError:
     QUESTIONARY_AVAILABLE = False
+
+from .topic_analyzer import TopicAnalyzer, UserProfile
 
 from .state import State
 from .progress import ProgressWriter
@@ -68,27 +70,95 @@ else:
     custom_style = None
 
 
-def _prompt_choice(prompt: str, options: list[str], default: int = 0, allow_other: bool = False) -> str:
+OPTION_DESCRIPTIONS = {
+    "report_type": {
+        "state-of-the-art": "Deep analysis of current research frontier",
+        "tutorial": "Step-by-step learning guide with examples",
+        "comparison": "Side-by-side analysis of approaches or technologies",
+        "survey": "Broad landscape overview of a field",
+    },
+    "expertise": {
+        "beginner": "Accessible language, explains fundamentals",
+        "intermediate": "Assumes working knowledge, focuses on application",
+        "expert": "Technical depth, latest research, assumes domain expertise",
+    },
+    "model": {
+        "sonnet": "Fast and cost-effective (~$2-5 per report)",
+        "opus": "Deeper analysis, higher quality (~$8-15 per report)",
+    },
+}
+
+
+def _build_choices(options: list[str], category: str, recs: Optional[dict] = None,
+                   rec_key: Optional[str] = None) -> list:
+    """Build Choice objects with descriptions and AI recommendations.
+
+    Args:
+        options: List of option values
+        category: Key in OPTION_DESCRIPTIONS
+        recs: AI recommendations dict (or None)
+        rec_key: Key in recs for the recommended value
+
+    Returns:
+        List of Choice objects if questionary available, else plain options
+    """
+    if not QUESTIONARY_AVAILABLE:
+        return options
+
+    descs = OPTION_DESCRIPTIONS.get(category, {})
+    choices = []
+    rec_value = recs.get(rec_key, "") if recs and rec_key else ""
+    rec_reason = recs.get(f"{rec_key}_reason", "") if recs and rec_key else ""
+
+    for opt in options:
+        desc = descs.get(opt, "")
+        if rec_value == opt and rec_reason:
+            label = f"{opt} (recommended)"
+            full_desc = f"{desc} — {rec_reason}" if desc else rec_reason
+            choices.append(Choice(label, value=opt, description=full_desc))
+        else:
+            choices.append(Choice(opt, value=opt, description=desc))
+    return choices
+
+
+def _prompt_choice(prompt: str, options: list[str], default: int = 0,
+                   allow_other: bool = False, rich_choices: list = None) -> str:
     """Prompt user to choose from a list of options with arrow key navigation.
 
     Args:
         prompt: Question to display
-        options: List of predefined options
+        options: List of predefined options (plain strings, used for fallback + default lookup)
         default: Index of default option
         allow_other: If True, add "Other (specify)" option for freeform input
+        rich_choices: Optional list of Choice objects with descriptions (questionary only)
 
     Returns:
         Selected option, or "custom:<user input>" for freeform entries
     """
     if QUESTIONARY_AVAILABLE:
-        choices = options.copy()
+        if rich_choices:
+            choices = list(rich_choices)
+            # Find default by value
+            default_val = options[default] if default < len(options) else None
+            default_choice = None
+            for c in choices:
+                if getattr(c, 'value', c) == default_val:
+                    default_choice = c
+                    break
+        else:
+            choices = options.copy()
+            default_choice = choices[default] if default < len(choices) else None
+
         if allow_other:
-            choices.append("Other (specify)")
+            if rich_choices:
+                choices.append(Choice("Other (specify)", value="__other__"))
+            else:
+                choices.append("Other (specify)")
 
         result = questionary.select(
             prompt,
             choices=choices,
-            default=choices[default],
+            default=default_choice,
             style=custom_style
         ).ask()
 
@@ -97,7 +167,7 @@ def _prompt_choice(prompt: str, options: list[str], default: int = 0, allow_othe
             ui.info(f"Using default: {options[default]}")
             return options[default]
 
-        if allow_other and result == "Other (specify)":
+        if allow_other and result in ("Other (specify)", "__other__"):
             custom = questionary.text("Enter custom value:", style=custom_style).ask()
             return f"custom:{custom}" if custom else options[default]
 
@@ -383,53 +453,83 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
     ui.info("Answer the following questions to configure your report.")
     ui.info("Press Enter to accept the default.")
 
-    # ─── Report Settings ───
-    ui.section_divider("Report Settings")
+    # Start AI analysis in background
+    analyzer = TopicAnalyzer(brief or topic, seed_refs=existing_refs)
+    analyzer.analyze_async()
 
-    # Smart defaults based on topic analysis
+    # ─── Step 1: Report Settings ───
+    ui.step("Step 1/4 — Report Settings")
+
+    # Smart defaults based on topic analysis (keyword fallback)
     topic_hints = _analyze_topic_defaults(brief or topic)
+
+    # Get AI recommendations (wait briefly for first prompt)
+    recs = analyzer.get_recommendations(timeout=3.0)
 
     # Report type - allow custom types like "technical deep-dive with code examples"
     report_type_options = ["state-of-the-art", "tutorial", "comparison", "survey"]
-    report_type_default = topic_hints["report_type_default"]
+    # Use AI recommendation for default if available
+    if recs and recs.get("report_type") in report_type_options:
+        report_type_default = report_type_options.index(recs["report_type"])
+    else:
+        report_type_default = topic_hints["report_type_default"]
+    report_type_choices = _build_choices(
+        report_type_options, "report_type", recs, "report_type")
     report_type = _prompt_choice(
         "What type of report?",
         report_type_options,
         default=report_type_default,
-        allow_other=True
+        allow_other=True,
+        rich_choices=report_type_choices
     )
 
     # Expertise level - allow custom audience descriptions
     expertise_options = ["beginner", "intermediate", "expert"]
-    expertise_default = topic_hints["expertise_default"]
+    if recs and recs.get("expertise") in expertise_options:
+        expertise_default = expertise_options.index(recs["expertise"])
+    else:
+        expertise_default = topic_hints["expertise_default"]
+    expertise_choices = _build_choices(
+        expertise_options, "expertise", recs, "expertise")
     expertise = _prompt_choice(
         "Target expertise level?",
         expertise_options,
         default=expertise_default,
-        allow_other=True
+        allow_other=True,
+        rich_choices=expertise_choices
     )
 
-    # ─── Research Settings ───
-    ui.section_divider("Research Settings")
+    # ─── Step 2: Research Settings ───
+    ui.step("Step 2/4 — Research Configuration")
 
-    # Agent count
+    # Agent count - use AI recommendation if available
+    agent_default = defaults.get('agents', 10)
+    if recs and isinstance(recs.get("agent_count"), int):
+        rec_agents = max(3, min(recs["agent_count"], 30))
+        agent_default = rec_agents
     agent_count = _prompt_int(
         "How many research agents? (more = broader coverage, higher cost)",
-        default=defaults.get('agents', 10), min_val=3, max_val=30
+        default=agent_default, min_val=3, max_val=30
     )
 
     # Research model
     model_options = ["sonnet", "opus"]
-    model_default = model_options.index(defaults.get('model', 'sonnet')) \
-        if defaults.get('model') in model_options else 0
+    if recs and recs.get("model") in model_options:
+        model_default = model_options.index(recs["model"])
+    elif defaults.get('model') in model_options:
+        model_default = model_options.index(defaults['model'])
+    else:
+        model_default = 0
+    model_choices = _build_choices(model_options, "model", recs, "model")
     model = _prompt_choice(
         "Research agent model? (opus = higher quality, ~5x cost)",
         model_options,
-        default=model_default
+        default=model_default,
+        rich_choices=model_choices
     )
 
-    # ─── Output Options ───
-    ui.section_divider("Output Options")
+    # ─── Step 3: Output Options ───
+    ui.step("Step 3/4 — Output Options")
 
     # Download papers
     download_papers = _prompt_yes_no("Download cited open-access papers?",
@@ -439,8 +539,8 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
     audio = _prompt_yes_no("Generate audio-friendly version?",
                            default=defaults.get('audio', False))
 
-    # ─── Seed References ───
-    ui.section_divider("Seed References")
+    # ─── Step 4: Seed References ───
+    ui.step("Step 4/4 — Seed References")
 
     seed_urls = []
     seed_folder = None
@@ -683,21 +783,44 @@ Examples:
             elif Path(args.refs).is_dir():
                 seed_folder = args.refs
 
-        clamped_agents = max(3, min(args.agents, 30))
-        if clamped_agents != args.agents:
-            ui.warning(f"Agent count adjusted from {args.agents} to {clamped_agents} (valid range: 3-30)")
+        # Use AI recommendations for defaults not explicitly set via CLI
+        analyzer = TopicAnalyzer(brief or topic, seed_refs=args.refs)
+        analyzer.analyze_async()
+        recs = analyzer.get_recommendations(timeout=3.0)
+
+        # Determine effective values: CLI flag > AI recommendation > hardcoded default
+        effective_model = args.model
+        effective_expertise = args.expertise
+        effective_report_type = args.report_type
+        effective_agents = args.agents
+
+        # Only apply AI recs when user didn't explicitly set CLI flags
+        # (argparse defaults are the signal that user didn't override)
+        if recs:
+            if args.model == "sonnet" and recs.get("model") in ("sonnet", "opus"):
+                effective_model = recs["model"]
+            if args.expertise == "intermediate" and recs.get("expertise") in ("beginner", "intermediate", "expert"):
+                effective_expertise = recs["expertise"]
+            if args.report_type == "state-of-the-art" and recs.get("report_type") in ("state-of-the-art", "tutorial", "comparison", "survey"):
+                effective_report_type = recs["report_type"]
+            if args.agents == 10 and isinstance(recs.get("agent_count"), int):
+                effective_agents = max(3, min(recs["agent_count"], 30))
+
+        clamped_agents = max(3, min(effective_agents, 30))
+        if clamped_agents != effective_agents:
+            ui.warning(f"Agent count adjusted from {effective_agents} to {clamped_agents} (valid range: 3-30)")
 
         config = {
             "topic": topic,
             "brief": brief,
-            "model": args.model,
+            "model": effective_model,
             "agent_count": clamped_agents,
             "seed_urls": seed_urls,
             "seed_refs_folder": seed_folder,
-            "download_papers": args.download_papers,  # False by default in quick mode; use --download-papers to enable
+            "download_papers": args.download_papers,
             "generate_audio": args.audio,
-            "expertise_level": args.expertise,
-            "report_type": args.report_type,
+            "expertise_level": effective_expertise,
+            "report_type": effective_report_type,
             "report_dir": args.output,
             "cwd": args.cwd,
         }
@@ -726,6 +849,8 @@ Examples:
     return run_new_report(config, ctx)
 
 
+
+
 def run_new_report(config: dict, ctx: OrchestratorContext) -> int:
     """Run a new report from scratch."""
 
@@ -745,6 +870,9 @@ def run_new_report(config: dict, ctx: OrchestratorContext) -> int:
     # Initialize state (will be saved after setup)
     state = State()
 
+    # Phase bar: initial state
+    ui.phase_bar(0)
+
     # Phase 1: Setup
     ui.phase_start(1, "Setup")
     if not run_setup(state, config):
@@ -757,8 +885,22 @@ def run_new_report(config: dict, ctx: OrchestratorContext) -> int:
     ctx.progress.phase_start(1, "Setup")
     ctx.progress.phase_complete(1, "Setup")
 
+    # Transition message
+    ui.info("Setup complete — decomposing into research threads...")
+    ui.phase_bar(1)
+
     # Continue with remaining phases
-    return continue_from_phase(state, 2, ctx)
+    result = continue_from_phase(state, 2, ctx)
+
+    # Update user profile after successful report
+    if result == 0:
+        try:
+            profile = UserProfile()
+            profile.update(config)
+        except Exception:
+            pass
+
+    return result
 
 
 def _validate_resume_files(state: State, target_phase: int) -> tuple[bool, str]:
@@ -1163,6 +1305,9 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
 
     original_handler = signal.signal(signal.SIGINT, _handle_sigint)
 
+    # Show initial phase bar
+    ui.phase_bar(start_phase - 1)
+
     try:
         for phase_num, phase_name, phase_func in phases:
             if phase_num < start_phase:
@@ -1187,6 +1332,21 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
                 ui.phase_complete(phase_num, phase_name)
                 if ctx.progress:
                     ctx.progress.phase_complete(phase_num, phase_name)
+
+                # Transition messages between phases
+                if phase_num == 1:
+                    ui.info("Setup complete — decomposing into research threads...")
+                elif phase_num == 2:
+                    thread_count = len(state.threads)
+                    ui.info(f"Plan ready — {thread_count} agents will research in parallel")
+                elif phase_num == 3:
+                    completed = len(state.completed_threads)
+                    ui.info(f"Research complete — synthesizing findings from {completed} agents...")
+                elif phase_num == 4:
+                    ui.info("Report assembled — running final cleanup...")
+
+                # Update phase bar after completion
+                ui.phase_bar(phase_num)
 
             except KeyboardInterrupt:
                 ui.warning(f"Interrupted during phase {phase_num}")
