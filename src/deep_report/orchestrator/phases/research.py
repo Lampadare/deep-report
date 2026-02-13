@@ -68,19 +68,15 @@ def run_research(
         if progress:
             progress.update(3, f"Iteration {iteration}/{max_iterations}", "starting")
 
-        # Determine what to research this iteration
-        if iteration == 1:
-            # First iteration: run all initial threads
-            threads_to_run = state.get_pending_threads()
-        else:
-            # Subsequent iterations: run follow-ups from decision agent
+        # Determine what to research: pending initial threads first, then followups
+        threads_to_run = state.get_pending_threads()
+        if not threads_to_run and iteration > 1:
             threads_to_run = state.get_pending_followups()
 
         if not threads_to_run:
-            # Resume case: batch already completed but decision agent never ran
             if state.completed_threads:
-                ui.info(f"{len(state.completed_threads)} threads already completed — evaluating coverage")
-                # Skip batch+summarize, fall through to decision agent below
+                # All threads done for this iteration — skip to decision agent
+                ui.info(f"{len(state.completed_threads)} threads completed — evaluating coverage")
             else:
                 ui.info("No threads to run, ending research")
                 break
@@ -95,31 +91,7 @@ def run_research(
                 intervention_handler=intervention_handler,
             )
 
-            # Update state with completed/failed
-            for thread_id, result in results.items():
-                if result.success:
-                    if thread_id.startswith("followup_"):
-                        _mark_followup_complete(state, thread_id, result)
-                        if thread_id not in state.completed_threads:
-                            state.completed_threads.append(thread_id)
-                    else:
-                        if thread_id not in state.completed_threads:
-                            state.completed_threads.append(thread_id)
-                        state.update_thread(thread_id, status="completed", output_file=result.output_file)
-                else:
-                    if thread_id.startswith("followup_"):
-                        _mark_followup_failed(state, thread_id, result.error)
-                        if thread_id not in state.failed_threads:
-                            state.failed_threads.append(thread_id)
-                    else:
-                        if thread_id not in state.failed_threads:
-                            state.failed_threads.append(thread_id)
-                        state.update_thread(thread_id, status="failed")
-                    ui.warning(f"Thread {thread_id} failed: {result.error[:80]}")
-                    if progress:
-                        progress.error(3, f"Thread {thread_id}: {result.error[:100]}")
-
-            state.save()
+            # on_complete already updated state + saved incrementally
             state.checkpoint(f"research_batch_{iteration}_complete")
 
             # Summarize all new outputs
@@ -277,7 +249,7 @@ def _run_research_batch(
 
     # Build thread info for live table display
     thread_info = [{"id": t["id"], "title": t.get("title", t["id"])} for t in tasks]
-    max_workers = 10
+    max_workers = min(len(tasks), 15)
     concurrent_note = f" — {max_workers} concurrent" if len(tasks) > max_workers else ""
     ui.research_table_start(thread_info, title=f"RESEARCH AGENTS (Iteration {iteration}){concurrent_note}")
 
@@ -295,29 +267,38 @@ def _run_research_batch(
     state_lock = threading.Lock()
 
     def on_complete(task_id: str, result: AgentResult):
+        # In-memory mutations under lock (fast), disk I/O outside (slow)
         with state_lock:
             completed[0] += 1
             current = completed[0]
 
-            # Accumulate cost estimate
             running_cost[0] += result.estimated_cost
             state.total_cost = running_cost[0]
 
-            # Incremental state save — survives Ctrl+C
             if result.success:
                 if task_id not in state.completed_threads:
                     state.completed_threads.append(task_id)
                 if task_id.startswith("followup_"):
                     _mark_followup_complete(state, task_id, result)
                 else:
-                    state.update_thread(task_id, status="completed", output_file=result.output_file)
+                    for t in state.threads:
+                        if t.get("id") == task_id:
+                            t["status"] = "completed"
+                            t["output_file"] = result.output_file
+                            break
             else:
                 if task_id not in state.failed_threads:
                     state.failed_threads.append(task_id)
                 if task_id.startswith("followup_"):
                     _mark_followup_failed(state, task_id, result.error)
                 else:
-                    state.update_thread(task_id, status="failed")
+                    for t in state.threads:
+                        if t.get("id") == task_id:
+                            t["status"] = "failed"
+                            break
+
+        # Persist to disk outside the lock — state.save() has its own _save_lock
+        state.save()
 
         # Update table status and running cost
         status = "complete" if result.success else "failed"
@@ -592,22 +573,18 @@ def _create_followups(state: State, decision: dict, iteration: int):
 
 
 def _mark_followup_complete(state: State, followup_id: str, result: AgentResult):
-    """Mark a followup as completed. Thread-safe via state._save_lock."""
-    with state._save_lock:
-        for fu in state.followups:
-            if fu.get("id") == followup_id:
-                fu["status"] = "completed"
-                fu["output_file"] = result.output_file
-                state.save()
-                return
+    """Mark a followup as completed (in-memory only, caller saves)."""
+    for fu in state.followups:
+        if fu.get("id") == followup_id:
+            fu["status"] = "completed"
+            fu["output_file"] = result.output_file
+            return
 
 
 def _mark_followup_failed(state: State, followup_id: str, error: str):
-    """Mark a followup as failed. Thread-safe via state._save_lock."""
-    with state._save_lock:
-        for fu in state.followups:
-            if fu.get("id") == followup_id:
-                fu["status"] = "failed"
-                fu["error"] = error
-                state.save()
-                return
+    """Mark a followup as failed (in-memory only, caller saves)."""
+    for fu in state.followups:
+        if fu.get("id") == followup_id:
+            fu["status"] = "failed"
+            fu["error"] = error
+            return

@@ -114,10 +114,16 @@ class DeepReportUI:
         self._research_start_time = None
         # Running cost display
         self._table_cost = None
+        # Verbose log buffer: stores recent warnings/errors for replay on toggle
+        from collections import deque
+        self._log_buffer = deque(maxlen=50)
 
     def set_verbose(self, enabled: bool):
         """Enable or disable verbose mode."""
+        was_off = not self._verbose
         self._verbose = enabled
+        if enabled and was_off:
+            self._replay_log_buffer()
 
     @property
     def verbose_enabled(self) -> bool:
@@ -125,7 +131,8 @@ class DeepReportUI:
         return self._verbose
 
     def verbose(self, message: str):
-        """Print message only if verbose mode is enabled."""
+        """Print message only if verbose mode is enabled. Always buffers."""
+        self._log_buffer.append(("verbose", message))
         if not self._verbose:
             return
         if RICH_AVAILABLE:
@@ -135,6 +142,29 @@ class DeepReportUI:
                 self.console.print(f"[{theme.dim}]{message}[/]")
         else:
             print(f"  [V] {message}")
+
+    def _replay_log_buffer(self):
+        """Replay buffered log entries when verbose is toggled on."""
+        if not self._log_buffer:
+            return
+        if RICH_AVAILABLE:
+            console = self.console
+            if self._research_live and getattr(self._research_live, 'is_started', False):
+                console = self._research_live.console
+            console.print(f"[{theme.dim}]── recent log ({len(self._log_buffer)} entries) ──[/]")
+            for level, msg in self._log_buffer:
+                if level == "warning":
+                    console.print(f"[{theme.dim}]⚠ {msg}[/]")
+                elif level == "error":
+                    console.print(f"[{theme.dim}]✗ {msg}[/]")
+                else:
+                    console.print(f"[{theme.dim}]  {msg}[/]")
+            console.print(f"[{theme.dim}]── end log ──[/]")
+        else:
+            print(f"  --- recent log ({len(self._log_buffer)} entries) ---")
+            for level, msg in self._log_buffer:
+                print(f"  [{level}] {msg}")
+            print("  --- end log ---")
 
     def _truncate(self, text: str, max_len: int = 60) -> str:
         """Truncate text to max_len, replacing newlines with spaces."""
@@ -303,6 +333,7 @@ class DeepReportUI:
 
     def warning(self, message: str):
         """Print a warning message."""
+        self._log_buffer.append(("warning", message))
         if RICH_AVAILABLE:
             self.console.print(f"[bold {theme.warning}]⚠[/] {message}")
         else:
@@ -310,6 +341,7 @@ class DeepReportUI:
 
     def error(self, message: str):
         """Print an error message."""
+        self._log_buffer.append(("error", message))
         if RICH_AVAILABLE:
             self.console.print(f"[bold {theme.error}]✗ ERROR:[/] {message}")
         else:

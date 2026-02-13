@@ -1314,6 +1314,7 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
     # Set up verbose toggle (press 'v' during execution)
     def on_verbose_toggle(enabled: bool):
         ui.set_verbose(enabled)
+        print()  # blank line separator
         if enabled:
             ui.dim("  verbose output ON — press 'v' again to hide")
         else:
@@ -1321,10 +1322,6 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
 
     verbose_toggle = VerboseToggle(on_toggle=on_verbose_toggle)
     toggle_available = verbose_toggle.start()
-    if ctx.verbose:
-        ui.dim("  verbose mode on (--verbose)")
-    elif toggle_available:
-        ui.dim("  press 'v' to toggle verbose output")
 
     phases = [
         (1, "Setup", lambda s: True),  # Already done if start_phase > 1
@@ -1368,8 +1365,14 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
 
     original_handler = signal.signal(signal.SIGINT, _handle_sigint)
 
-    # Show initial phase bar
+    # Show initial phase bar, then verbose hint below with spacing
     ui.phase_bar(start_phase - 1)
+    print("\n\n")
+    if ctx.verbose:
+        ui.set_verbose(True)
+        ui.dim("  verbose mode on (--verbose)")
+    elif toggle_available:
+        ui.dim("  press 'v' to toggle verbose output")
 
     try:
         for phase_num, phase_name, phase_func in phases:
