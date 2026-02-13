@@ -61,8 +61,6 @@ def run_research(
 
     while iteration < max_iterations:
         iteration += 1
-        state.research_iteration = iteration
-        state.checkpoint(f"research_iteration_{iteration}")
 
         ui.info(f"Research Iteration {iteration}/{max_iterations}")
         if progress:
@@ -92,6 +90,9 @@ def run_research(
             )
 
             # on_complete already updated state + saved incrementally
+            # Persist iteration number only after batch succeeds (not before,
+            # so an interrupted batch doesn't skip the iteration on resume)
+            state.research_iteration = iteration
             state.checkpoint(f"research_batch_{iteration}_complete")
 
             # Summarize all new outputs
