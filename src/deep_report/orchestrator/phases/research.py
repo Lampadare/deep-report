@@ -187,10 +187,10 @@ def _gather_seed_context(report_dir: Path) -> str:
         return ""
 
     context = []
-    for f in summaries_dir.glob("*.md"):
+    for f in sorted(summaries_dir.glob("*.md")):
         try:
-            content = f.read_text()[:1000]
-            context.append(f"[{f.stem}]: {content[:500]}...")
+            content = f.read_text().strip()
+            context.append(f"[{f.stem}]: {content}")
         except (OSError, IOError) as e:
             ui.warning(f"Failed to read seed context {f.name}: {e}")
 
@@ -412,7 +412,7 @@ def _build_research_prompt(
 {questions_text}
 
 ## Scope and Context
-{scope[:2000] if scope else "No scope document provided."}
+{scope if scope else "No scope document provided."}
 {seed_context}
 
 ## Research Parameters
@@ -455,6 +455,13 @@ Use WebSearch and WebFetch to find authoritative sources. Prioritize:
 - Official reports and documentation
 - Expert analyses from reputable institutions
 - Recent data (prefer last 3-5 years unless foundational)
+
+## Resilience Rules
+- If a WebFetch call fails (403, timeout, sibling error), do NOT retry it. Continue with your other results.
+- WebSearch results alone are sufficient to write a thorough report. WebFetch is a bonus, not a requirement.
+- NEVER produce empty or placeholder responses like "No response requested."
+- You MUST write the output file even if some or all fetches fail.
+- Always complete your task. Never stall or wait for external input.
 
 CRITICAL: You MUST call Write tool with file_path="{output_file}" to save your research.
 """
