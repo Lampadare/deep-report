@@ -883,8 +883,15 @@ Examples:
 
 
 
+def _check_auth():
+    """Probe Claude CLI auth. Warns on failure, never blocks."""
+    from ..cli import check_claude_auth
+    check_claude_auth()
+
+
 def run_new_report(config: dict, ctx: OrchestratorContext) -> int:
     """Run a new report from scratch."""
+    _check_auth()
 
     # Display header with Rich UI
     mode_str = "INTERACTIVE" if ctx.interactive else ""
@@ -1231,6 +1238,7 @@ Ready? Just run:
 
 def resume_report(report_dir: Path, ctx: OrchestratorContext) -> int:
     """Resume an existing report."""
+    _check_auth()
 
     state_file = report_dir / "state" / "orchestrator_state.json"
 

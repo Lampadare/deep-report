@@ -46,15 +46,8 @@ def main():
         print(f"deep-report {__version__}")
         return
 
-    if "--help" in sys.argv or "-h" in sys.argv:
-        # Let orchestrator handle --help
-        pass
-    else:
-        # Check Claude CLI before running (skip for non-report commands)
+    if "--help" not in sys.argv and "-h" not in sys.argv:
         check_claude_cli()
-        skip_auth_flags = {"--list", "--delete", "--setup-skill", "--install-skill", "--intro", "--update"}
-        if not skip_auth_flags.intersection(sys.argv):
-            check_claude_auth()
 
     # Import and run orchestrator
     from .orchestrator.main import main as orchestrator_main
