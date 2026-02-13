@@ -264,6 +264,14 @@ def spawn_agent(
     """
     start = time.time()
 
+    # Don't spawn if shutdown is in progress
+    if process_tracker.is_shutting_down:
+        return AgentResult(
+            success=False, output="",
+            error="Shutdown in progress",
+            duration_secs=0.0
+        )
+
     # Validate model parameter
     if model not in ALLOWED_MODELS:
         return AgentResult(
@@ -399,6 +407,14 @@ def spawn_agent_with_retry(
     total_duration = 0.0
 
     for attempt in range(max_retries):
+        # Bail immediately if shutdown is in progress
+        if process_tracker.is_shutting_down:
+            return AgentResult(
+                success=False, output="",
+                error="Shutdown in progress",
+                duration_secs=total_duration, retries=attempt
+            )
+
         result = spawn_agent(
             prompt=prompt,
             model=model,
@@ -415,17 +431,28 @@ def spawn_agent_with_retry(
 
         last_error = result.error
 
-        # Check if error is structural (no point retrying)
+        # Don't retry if shutting down or error is structural
+        if process_tracker.is_shutting_down:
+            result.retries = attempt
+            return result
         if _is_structural_error(result.error):
             result.retries = attempt
             return result
 
-        # Exponential backoff before retry
+        # Exponential backoff before retry (interruptible by shutdown)
         if attempt < max_retries - 1:
             wait_time = backoff_base * (2 ** attempt)
             err_msg = str(result.error)[:100] + ("..." if len(str(result.error)) > 100 else "")
             ui.verbose(f"Retry {attempt+1}/{max_retries} in {wait_time:.0f}s... (error: {err_msg})")
-            time.sleep(wait_time)
+            # Sleep in 1s intervals so we can check shutdown flag
+            for _ in range(int(wait_time)):
+                if process_tracker.is_shutting_down:
+                    return AgentResult(
+                        success=False, output="",
+                        error="Shutdown in progress",
+                        duration_secs=total_duration, retries=attempt
+                    )
+                time.sleep(1)
 
     return AgentResult(
         success=False,
@@ -462,6 +489,9 @@ def spawn_agents_parallel(
         futures = {}
 
         for task in tasks:
+            if process_tracker.is_shutting_down:
+                break
+
             # Atomic circuit breaker check: wait_if_needed waits and returns proceed status
             if not cb.wait_if_needed():
                 continue

@@ -449,7 +449,7 @@ class DeepReportUI:
         with self._status_lock:
             table = Table(show_header=True, box=ROUNDED)
             table.add_column("#", width=4, justify="right")
-            table.add_column("Agent", width=32)
+            table.add_column("Agent", min_width=30, max_width=55, no_wrap=True)
             table.add_column("Status", width=20)
 
             char = SPINNER_CHARS[self._spinner_frame % len(SPINNER_CHARS)]
@@ -457,11 +457,13 @@ class DeepReportUI:
 
             for i, thread in enumerate(self._threads, 1):
                 tid = thread["id"]
-                title = self._truncate(thread.get("title", tid), 30)
+                title = self._truncate(thread.get("title", tid), 50)
                 status = self._thread_status.get(tid, "pending")
 
                 if status == "pending":
                     status_text = f"[{theme.dim}]○ Pending[/]"
+                elif status == "queued":
+                    status_text = f"[{theme.dim}]◦ Queued[/]"
                 elif status == "running":
                     status_text = f"[{theme.accent}]{char} Running...[/]"
                 elif status == "complete":
@@ -523,10 +525,10 @@ class DeepReportUI:
             print(f"  [{symbol}] {thread_id}: {status}")
 
     def research_table_mark_next_running(self):
-        """Mark the next pending thread as running (thread-safe)."""
+        """Mark the next queued/pending thread as running (thread-safe)."""
         with self._status_lock:
             for tid, s in self._thread_status.items():
-                if s == "pending":
+                if s in ("queued", "pending"):
                     self._thread_status[tid] = "running"
                     break
             else:

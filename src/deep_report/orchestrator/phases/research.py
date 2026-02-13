@@ -253,15 +253,17 @@ def _run_research_batch(
         })
 
     # Build thread info for live table display
-    thread_info = [{"id": t["id"], "title": t.get("title", t["id"])[:30]} for t in tasks]
-    ui.research_table_start(thread_info, title=f"RESEARCH AGENTS (Iteration {iteration})")
+    thread_info = [{"id": t["id"], "title": t.get("title", t["id"])} for t in tasks]
+    max_workers = 10
+    concurrent_note = f" — {max_workers} concurrent" if len(tasks) > max_workers else ""
+    ui.research_table_start(thread_info, title=f"RESEARCH AGENTS (Iteration {iteration}){concurrent_note}")
 
     # Mark first batch as running (up to max_workers).
-    # NOTE: This is an approximation — ThreadPoolExecutor may not start all
-    # of these immediately, but it gives the user a reasonable visual estimate.
-    max_workers = 10
     for t in thread_info[:max_workers]:
         ui.research_table_update(t["id"], "running")
+    # Mark remaining as queued so user knows they're waiting for a slot
+    for t in thread_info[max_workers:]:
+        ui.research_table_update(t["id"], "queued")
 
     # Progress callback with thread-safe counter and incremental state saves
     completed = [0]
