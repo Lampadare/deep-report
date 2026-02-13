@@ -1365,14 +1365,12 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
 
     original_handler = signal.signal(signal.SIGINT, _handle_sigint)
 
-    # Show initial phase bar, then verbose hint below with spacing
+    # Show initial phase bar
     ui.phase_bar(start_phase - 1)
-    print("\n\n")
+
+    # Enable verbose if requested (no hint — the research table footer shows 'v' = verbose)
     if ctx.verbose:
         ui.set_verbose(True)
-        ui.dim("  verbose mode on (--verbose)")
-    elif toggle_available:
-        ui.dim("  press 'v' to toggle verbose output")
 
     try:
         for phase_num, phase_name, phase_func in phases:

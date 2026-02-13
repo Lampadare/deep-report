@@ -253,6 +253,79 @@ def _is_structural_error(error: str) -> bool:
     return any(p in error_lower for p in structural_patterns)
 
 
+def _communicate_streaming(
+    process: subprocess.Popen,
+    prompt: str,
+    timeout_secs: int,
+    callback: Callable,
+    log_fh=None,
+) -> tuple[str, str]:
+    """Write prompt and read stdout line-by-line, firing callback for each event.
+
+    Parses stream-json lines to extract tool calls and results.
+    Returns (final_text_output, stderr) compatible with communicate().
+    """
+    # Write prompt and close stdin
+    process.stdin.write(prompt)
+    process.stdin.close()
+
+    lines = []
+    stderr_lines = []
+    final_text = ""
+
+    def read_stderr():
+        for line in process.stderr:
+            stderr_lines.append(line)
+
+    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+    stderr_thread.start()
+
+    deadline = time.time() + timeout_secs
+    try:
+        for line in process.stdout:
+            lines.append(line)
+            if log_fh:
+                log_fh.write(line)
+                log_fh.flush()
+            if time.time() > deadline:
+                raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout_secs)
+
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                event = json.loads(stripped)
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            etype = event.get("type")
+
+            # Extract tool calls from assistant messages
+            if etype == "assistant":
+                msg = event.get("message", {})
+                for block in msg.get("content", []):
+                    if block.get("type") == "tool_use":
+                        tool_name = block.get("name", "?")
+                        tool_input = block.get("input", {})
+                        callback("tool_use", tool_name, tool_input)
+
+            # Extract final result text
+            elif etype == "result":
+                final_text = event.get("result", "")
+                cost = event.get("total_cost_usd", 0)
+                callback("result", "done", {"cost": cost, "text_len": len(final_text)})
+
+    except subprocess.TimeoutExpired:
+        raise
+
+    stderr_thread.join(timeout=5)
+    process.wait(timeout=10)
+
+    stderr_str = "".join(stderr_lines)
+    # In stream-json mode, the actual text output is in the result event
+    return final_text or "".join(lines), stderr_str
+
+
 def spawn_agent(
     prompt: str,
     model: str = "sonnet",
@@ -260,6 +333,8 @@ def spawn_agent(
     timeout_secs: int = DEFAULT_TIMEOUT,
     cwd: Optional[Path] = None,
     allowed_tools: Optional[list[str]] = None,
+    stream_callback: Optional[Callable] = None,
+    log_file: Optional[Path] = None,
 ) -> AgentResult:
     """Spawn a single Claude agent and return its output.
 
@@ -270,6 +345,7 @@ def spawn_agent(
         timeout_secs: Maximum time to wait
         cwd: Working directory for the agent
         allowed_tools: If provided, restrict agent to these tools only
+        log_file: If provided, dump all raw stdout/stderr to this file
 
     Returns:
         AgentResult with success status and output
@@ -296,12 +372,22 @@ def spawn_agent(
     # Build the command
     cmd = ["claude", "--print", "--model", model]
 
+    # Use stream-json when we have a callback OR a log file (for full conversation capture)
+    use_streaming = stream_callback is not None or log_file is not None
+    if use_streaming:
+        cmd.extend(["--verbose", "--output-format", "stream-json"])
+
     # Add tool restrictions if specified
     if allowed_tools:
         cmd.extend(["--allowedTools", ",".join(allowed_tools)])
 
     process = None
+    log_fh = None
     try:
+        if log_file:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_fh = open(log_file, "w", encoding="utf-8")
+
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -313,7 +399,18 @@ def spawn_agent(
         )
         process_tracker.register(process)
         try:
-            stdout, stderr = process.communicate(input=prompt, timeout=timeout_secs)
+            if use_streaming:
+                _cb = stream_callback or (lambda *a: None)
+                stdout, stderr = _communicate_streaming(
+                    process, prompt, timeout_secs, _cb, log_fh=log_fh
+                )
+            else:
+                stdout, stderr = process.communicate(input=prompt, timeout=timeout_secs)
+                # Dump full output to log file for non-streaming agents
+                if log_fh:
+                    log_fh.write(stdout)
+                    if stderr:
+                        log_fh.write(f"\n--- STDERR ---\n{stderr}")
         except subprocess.TimeoutExpired:
             # Kill the entire process group to ensure all children are terminated
             import signal
@@ -399,6 +496,12 @@ def spawn_agent(
             duration_secs=elapsed,
             estimated_cost=_COST_PER_SEC.get(model, 0.004) * elapsed,
         )
+    finally:
+        if log_fh:
+            try:
+                log_fh.close()
+            except Exception:
+                pass
 
 
 def spawn_agent_with_retry(
@@ -412,6 +515,8 @@ def spawn_agent_with_retry(
     allowed_tools: Optional[list[str]] = None,
     task_label: Optional[str] = None,
     intervention_handler: "Optional[InterventionHandler]" = None,
+    stream_callback: Optional[Callable] = None,
+    log_file: Optional[Path] = None,
 ) -> AgentResult:
     """Spawn agent with exponential backoff retry.
 
@@ -452,6 +557,8 @@ def spawn_agent_with_retry(
             timeout_secs=timeout_secs,
             cwd=cwd,
             allowed_tools=allowed_tools,
+            stream_callback=stream_callback,
+            log_file=log_file,
         )
         total_duration += result.duration_secs
 
@@ -509,6 +616,9 @@ def spawn_agents_parallel(
     on_complete: Optional[Callable] = None,
     circuit_breaker: Optional[CircuitBreaker] = None,
     intervention_handler: "Optional[InterventionHandler]" = None,
+    stream_callback_factory: Optional[Callable] = None,
+    stagger_secs: float = 0.0,
+    log_dir: Optional[Path] = None,
 ) -> dict[str, AgentResult]:
     """Spawn multiple agents in parallel.
 
@@ -518,6 +628,9 @@ def spawn_agents_parallel(
         on_complete: Callback(task_id, result) called after each completion
         circuit_breaker: Optional circuit breaker to pause on repeated failures
         intervention_handler: Optional InterventionHandler for interactive mode
+        stream_callback_factory: Optional factory(task_id) -> callback for streaming
+        stagger_secs: Delay between task submissions to avoid API thundering herd
+        log_dir: If provided, dump full agent output to log_dir/<task_id>.jsonl
 
     Returns:
         Dict mapping task_id to AgentResult
@@ -530,13 +643,27 @@ def spawn_agents_parallel(
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {}
 
-        for task in tasks:
+        for i, task in enumerate(tasks):
             if process_tracker.is_shutting_down:
                 break
 
             # Atomic circuit breaker check: wait_if_needed waits and returns proceed status
             if not cb.wait_if_needed():
                 continue
+
+            # Stagger submissions to avoid API thundering herd
+            if stagger_secs > 0 and i > 0:
+                time.sleep(stagger_secs)
+
+            # Build per-task stream callback if factory provided
+            task_stream_cb = None
+            if stream_callback_factory:
+                task_stream_cb = stream_callback_factory(task.get("id", ""))
+
+            # Build per-task log file if log_dir provided
+            task_log_file = None
+            if log_dir:
+                task_log_file = log_dir / f"{task.get('id', f'task_{i}')}.jsonl"
 
             # Use retry wrapper for reliability
             try:
@@ -551,6 +678,8 @@ def spawn_agents_parallel(
                     allowed_tools=task.get("allowed_tools"),
                     task_label=task.get("id", ""),
                     intervention_handler=intervention_handler,
+                    stream_callback=task_stream_cb,
+                    log_file=task_log_file,
                 )
             except RuntimeError:
                 # Pool is shutting down

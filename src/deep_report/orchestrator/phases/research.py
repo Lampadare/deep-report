@@ -249,7 +249,15 @@ def _run_research_batch(
 
     # Build thread info for live table display
     thread_info = [{"id": t["id"], "title": t.get("title", t["id"])} for t in tasks]
-    max_workers = min(len(tasks), 15)
+    # Cap concurrency to avoid API OTPM rate limits.
+    # Opus OTPM limits: Tier1=8K, Tier2=90K, Tier3=160K, Tier4=400K.
+    # Each agent request reserves max_tokens (~8-64K) of OTPM upfront.
+    # Safe defaults: opus→3 concurrent, sonnet→8 concurrent.
+    model = state.research_model
+    if model == "opus":
+        max_workers = min(len(tasks), 3)
+    else:
+        max_workers = min(len(tasks), 8)
     concurrent_note = f" — {max_workers} concurrent" if len(tasks) > max_workers else ""
     ui.research_table_start(thread_info, title=f"RESEARCH AGENTS (Iteration {iteration}){concurrent_note}")
 
@@ -322,8 +330,40 @@ def _run_research_batch(
                 result.duration_secs, result.retries
             )
 
+    # Stream callback factory: creates per-thread loggers for real-time visibility
+    def make_stream_cb(thread_id: str):
+        def cb(event_type: str, name: str, data: dict):
+            if event_type == "tool_use":
+                # Log tool calls with thread context
+                if name == "WebSearch":
+                    query = data.get("query", "")[:80]
+                    ui.verbose(f"[{thread_id}] WebSearch: {query}")
+                elif name == "WebFetch":
+                    url = data.get("url", "")[:80]
+                    ui.verbose(f"[{thread_id}] WebFetch: {url}")
+                elif name == "Write":
+                    path = data.get("file_path", "")
+                    fname = path.split("/")[-1] if "/" in path else path
+                    ui.verbose(f"[{thread_id}] Write: {fname}")
+                elif name == "Read":
+                    path = data.get("file_path", "")
+                    fname = path.split("/")[-1] if "/" in path else path
+                    ui.verbose(f"[{thread_id}] Read: {fname}")
+                else:
+                    ui.verbose(f"[{thread_id}] {name}")
+            elif event_type == "result":
+                cost = data.get("cost", 0)
+                ui.verbose(f"[{thread_id}] Done (${cost:.2f})")
+        return cb
+
+    # Log full agent conversations to logs/ for debugging
+    log_dir = report_dir / "logs" / f"iteration_{iteration}"
+
     results = spawn_agents_parallel(tasks, max_workers=max_workers, on_complete=on_complete,
-                                     intervention_handler=intervention_handler)
+                                     intervention_handler=intervention_handler,
+                                     stream_callback_factory=make_stream_cb if ui._verbose else None,
+                                     stagger_secs=30.0,
+                                     log_dir=log_dir)
     ui.research_table_complete()
 
     # #14: Print failure summary

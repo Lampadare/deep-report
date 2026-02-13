@@ -13,9 +13,10 @@ import time
 
 # Try to import Rich, fall back to plain text if not available
 try:
-    from rich.console import Console
+    from rich.console import Console, Group
     from rich.panel import Panel
     from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+    from rich.rule import Rule
     from rich.table import Table
     from rich.box import ROUNDED
     from rich.live import Live
@@ -117,6 +118,8 @@ class DeepReportUI:
         # Verbose log buffer: stores recent warnings/errors for replay on toggle
         from collections import deque
         self._log_buffer = deque(maxlen=50)
+        # Current phase (for Live footer bar)
+        self._current_phase = 0
 
     def set_verbose(self, enabled: bool):
         """Enable or disable verbose mode."""
@@ -136,16 +139,20 @@ class DeepReportUI:
         if not self._verbose:
             return
         if RICH_AVAILABLE:
+            # When Live is active, the log buffer is rendered as part of the
+            # Live display — no need to console.print (would go above Live).
             if self._research_live and getattr(self._research_live, 'is_started', False):
-                self._research_live.console.print(f"[{theme.dim}]{message}[/]")
-            else:
-                self.console.print(f"[{theme.dim}]{message}[/]")
+                return
+            self.console.print(f"[{theme.dim}]{message}[/]")
         else:
             print(f"  [V] {message}")
 
     def _replay_log_buffer(self):
         """Replay buffered log entries when verbose is toggled on."""
         if not self._log_buffer:
+            return
+        # When Live is active, buffer is rendered as part of the Live display
+        if self._research_live and getattr(self._research_live, 'is_started', False):
             return
         if RICH_AVAILABLE:
             console = self.console
@@ -264,6 +271,7 @@ class DeepReportUI:
         if self._session_start_time is None:
             self._session_start_time = time.time()
         self._phase_start_time = time.time()
+        self._current_phase = phase
 
         icon = PHASE_ICONS.get(phase, "▶")
         self._update_title(f"deep-report: Phase {phase}/5 — {name}")
@@ -316,6 +324,22 @@ class DeepReportUI:
                 else:
                     parts.append(f"[  {name}]")
             print(" → ".join(parts))
+
+    def _render_phase_bar_text(self) -> "Text":
+        """Return phase bar as a Rich Text renderable (for Live footer)."""
+        PHASE_NAMES = ["Setup", "Planning", "Research", "Synthesis", "Cleanup"]
+        completed = self._current_phase - 1
+        text = Text()
+        for i, name in enumerate(PHASE_NAMES, 1):
+            if i > 1:
+                text.append(" → ", "dim")
+            if i <= completed:
+                text.append(f"✓ {name}", f"bold {theme.success}")
+            elif i == self._current_phase:
+                text.append(f"▶ {name}", f"bold {theme.accent}")
+            else:
+                text.append(f"○ {name}", theme.dim)
+        return text
 
     def step(self, message: str):
         """Print a step message."""
@@ -556,13 +580,27 @@ class DeepReportUI:
         if table_cost is not None:
             parts.append(f"Cost: ${table_cost:.2f}")
 
-        parts.append(f"[{theme.dim}]'v' = verbose[/]")
-        parts.append(f"[{theme.dim}]Ctrl+C x2 = quit[/]")
+        parts.append(f"[{theme.dim}]'v' = verbose | Ctrl+C x2 = quit[/]")
 
         summary = " | ".join(parts)
 
-        return Panel(table, title=f"[bold]🔬 {research_title}[/]",
-                     subtitle=summary, border_style=theme.border)
+        panel = Panel(table, title=f"[bold]🔬 {research_title}[/]",
+                      subtitle=summary, border_style=theme.border)
+
+        renderables = [panel]
+
+        # Verbose log tail (last 8 entries shown in the Live area)
+        if self._verbose and self._log_buffer:
+            recent = list(self._log_buffer)[-8:]
+            for level, msg in recent:
+                prefix = "⚠ " if level == "warning" else "✗ " if level == "error" else "  "
+                renderables.append(Text(f"{prefix}{msg}", style=theme.dim))
+
+        # Footer: separator + phase bar
+        renderables.append(Rule(style=theme.dim))
+        renderables.append(self._render_phase_bar_text())
+
+        return Group(*renderables)
 
     def research_table_update(self, thread_id: str, status: str, duration: float = 0):
         """Update a thread's status."""
