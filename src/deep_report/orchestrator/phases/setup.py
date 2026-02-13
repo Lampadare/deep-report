@@ -15,6 +15,18 @@ from ..state import State
 from ..utils import spawn_agent, AGENT_TOOLS
 from ..ui import ui
 
+# Extensions we accept as seed references
+_SEED_EXTENSIONS = {'.pdf', '.md', '.txt', '.html', '.json', '.xlsx', '.xls', '.csv', '.docx'}
+
+
+def _is_visible_seed(path: Path) -> bool:
+    """Return True if path is a non-hidden file with a supported extension."""
+    return (
+        path.is_file()
+        and not path.name.startswith('.')
+        and path.suffix.lower() in _SEED_EXTENSIONS
+    )
+
 
 def _sanitize_topic(topic: str) -> str:
     """Sanitize topic to prevent path traversal and shell injection."""
@@ -96,8 +108,7 @@ def _auto_detect_seeds(cwd: Path) -> Optional[Path]:
     for name in candidates:
         path = cwd / name
         if path.is_dir():
-            # Check if it has any files
-            files = [f for f in path.iterdir() if f.is_file()]
+            files = [f for f in path.iterdir() if _is_visible_seed(f)]
             if files:
                 return path
     return None
@@ -214,7 +225,7 @@ def run_setup(state: State, args: dict) -> bool:
     if state.seed_refs_folder:
         folder = Path(state.seed_refs_folder)
         if folder.exists():
-            seeds_to_process.extend([str(f) for f in folder.iterdir() if f.is_file()])
+            seeds_to_process.extend([str(f) for f in folder.iterdir() if _is_visible_seed(f)])
 
     if state.seed_urls:
         seeds_to_process.extend(state.seed_urls)
@@ -348,6 +359,13 @@ def _process_seeds_via_agent(state: State, seeds: list[str]) -> bool:
     tasks = []
 
     for i, seed in enumerate(seeds):
+        # Skip hidden or unsupported files that slipped through
+        if not seed.startswith("http"):
+            p = Path(seed)
+            if p.name.startswith('.') or (p.suffix.lower() not in _SEED_EXTENSIONS):
+                ui.warning(f"Skipping unsupported seed: {p.name}")
+                continue
+
         output_file = report_dir / "full" / "seeds" / f"seed_{i+1}.md"
 
         # Use brief if available (detailed research instructions), otherwise topic

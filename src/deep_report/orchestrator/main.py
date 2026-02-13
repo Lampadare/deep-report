@@ -222,7 +222,8 @@ def _find_seed_folder_candidates(cwd: Path) -> list[tuple[str, int]]:
         # Count relevant files
         try:
             files = [f for f in item.iterdir()
-                     if f.is_file() and f.suffix.lower() in {'.pdf', '.md', '.txt', '.html', '.json'}]
+                     if f.is_file() and not f.name.startswith('.')
+                     and f.suffix.lower() in {'.pdf', '.md', '.txt', '.html', '.json'}]
         except PermissionError:
             continue
 

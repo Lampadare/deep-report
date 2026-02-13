@@ -9,7 +9,7 @@ import json
 import os
 import tempfile
 import threading
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Any
 from datetime import datetime
@@ -192,9 +192,11 @@ class State:
             state_path = Path(self._state_file)
             state_path.parent.mkdir(parents=True, exist_ok=True)
 
-            data = asdict(self)
-            del data["_state_file"]
-            del data["_save_lock"]
+            data = {
+                f.name: getattr(self, f.name)
+                for f in self.__dataclass_fields__.values()
+                if not f.name.startswith("_")
+            }
             data["updated_at"] = datetime.now().isoformat()
 
             def json_default(obj):
