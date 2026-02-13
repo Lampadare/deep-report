@@ -46,15 +46,21 @@ class ApprovalGate:
         self.approval_file = self.report_dir / "state" / "pending_approval.json"
         self.progress = progress
 
-    def request_approval(self, gate_id: str, metadata: dict) -> bool:
+    # Gate types control which options are shown
+    GATE_PROCEED_OR_QUIT = "proceed_or_quit"      # Enter=proceed, q=quit
+    GATE_PROCEED_STOP_QUIT = "proceed_stop_quit"   # Enter=proceed, s=stop & synthesize, q=quit
+
+    def request_approval(self, gate_id: str, metadata: dict,
+                         gate_type: str = "proceed_or_quit") -> bool:
         """Request user approval. Blocks until approved or rejected.
 
         Args:
             gate_id: Identifier for this approval gate
             metadata: Dict of metadata to show user (NEVER content)
+            gate_type: Controls option set — "proceed_or_quit" or "proceed_stop_quit"
 
         Returns:
-            True if approved, False if rejected
+            True if approved (proceed), False if stopped early (synthesize now)
         """
         if not self.interactive:
             return True  # Auto-approve in non-interactive mode
@@ -74,6 +80,8 @@ class ApprovalGate:
 
         if self.progress:
             self.progress.approval_waiting(gate_id)
+
+        is_iteration = gate_type == self.GATE_PROCEED_STOP_QUIT
 
         # Display to user with Rich if available
         while True:
@@ -97,7 +105,6 @@ class ApprovalGate:
                     key_display = key.replace("_", " ").title()
                     table.add_row(key_display, str(value))
 
-                # Create panel with table
                 console.print(Panel(
                     table,
                     title=f"[bold yellow]⏸ APPROVAL REQUIRED[/]",
@@ -106,21 +113,20 @@ class ApprovalGate:
                     padding=(1, 2)
                 ))
 
-                # Options
                 console.print()
-                console.print("[bold]Options:[/]")
-                console.print("  [green]y[/] / [green]Enter[/]  Approve and continue")
-                console.print("  [yellow]n[/]          Reject (skip this step)")
-                console.print("  [red]q[/]          Quit orchestrator")
+                console.print("  [green]Enter[/]  Proceed")
+                if is_iteration:
+                    console.print("  [yellow]s[/]      Stop researching, synthesize now")
+                console.print("  [red]q[/]      Quit (progress saved, resume later)")
                 console.print()
 
                 try:
-                    response = console.input("[bold]Approve?[/] (y): ").strip().lower()
+                    prompt = "[bold]Proceed?[/] " + ("[Enter/s/q]: " if is_iteration else "[Enter/q]: ")
+                    response = console.input(prompt).strip().lower()
                 except EOFError:
-                    console.print("\n[yellow]No input available, defaulting to reject[/]")
-                    response = 'n'
+                    console.print(f"\n[yellow]No input available, proceeding[/]")
+                    response = ''
             else:
-                # Fallback to plain text
                 print(f"\n{'='*60}")
                 print(f"APPROVAL REQUIRED: {gate_id}")
                 print(f"{'='*60}")
@@ -129,43 +135,50 @@ class ApprovalGate:
                         value = json.dumps(value, indent=2)
                     print(f"  {key}: {value}")
                 print(f"{'='*60}")
-                print("\nOptions:")
-                print("  [y/Enter] Approve and continue")
-                print("  [n]       Reject (skip this step)")
-                print("  [q]       Quit orchestrator")
+                print()
+                print("  [Enter]  Proceed")
+                if is_iteration:
+                    print("  [s]      Stop researching, synthesize now")
+                print("  [q]      Quit (progress saved, resume later)")
                 print()
 
                 try:
-                    response = input("Approve? [y/n/q]: ").strip().lower()
+                    prompt = "Proceed? " + ("[Enter/s/q]: " if is_iteration else "[Enter/q]: ")
+                    response = input(prompt).strip().lower()
                 except EOFError:
-                    print("\nNo input available, defaulting to reject")
-                    response = 'n'
+                    print("\nNo input available, proceeding")
+                    response = ''
 
-            # Explicit handling of responses to avoid double approval on empty input
             if response == 'q':
-                approved = False
                 break
-            elif response in ('n', 'no'):
-                approved = False
+            elif response in ('s',) and is_iteration:
                 break
             elif response in ('y', 'yes', ''):
-                approved = True
                 break
             else:
-                ui.warning(f"Unrecognized input '{response}'. Please enter y, n, or q.")
+                valid = "Enter, s, or q" if is_iteration else "Enter or q"
+                ui.warning(f"Unrecognized input '{response}'. Please enter {valid}.")
                 continue
 
         if response == 'q':
             request["status"] = "quit"
             request["responded_at"] = datetime.now().isoformat()
-            self.approval_file.write_text(json.dumps(request, indent=2))
+            try:
+                self.approval_file.write_text(json.dumps(request, indent=2))
+            except Exception:
+                pass
             if self.progress:
                 self.progress.approval_received(gate_id, False)
             raise KeyboardInterrupt("User quit at approval gate")
 
-        request["status"] = "approved" if approved else "rejected"
+        approved = response != 's'
+
+        request["status"] = "approved" if approved else "stopped_early"
         request["responded_at"] = datetime.now().isoformat()
-        self.approval_file.write_text(json.dumps(request, indent=2))
+        try:
+            self.approval_file.write_text(json.dumps(request, indent=2))
+        except Exception:
+            pass
 
         if self.progress:
             self.progress.approval_received(gate_id, approved)
@@ -241,7 +254,10 @@ class ApprovalGate:
             **research_meta,
         }
 
-        return self.request_approval(f"iteration_{iteration + 1}", metadata)
+        return self.request_approval(
+            f"iteration_{iteration + 1}", metadata,
+            gate_type=self.GATE_PROCEED_STOP_QUIT
+        )
 
     def pre_synthesis_gate(self, state) -> bool:
         """Approval gate before synthesis (optional)."""

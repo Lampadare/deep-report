@@ -308,6 +308,13 @@ class DeepReportUI:
         else:
             print(f"[INFO] {message}")
 
+    def dim(self, message: str):
+        """Print a faint/dim message."""
+        if RICH_AVAILABLE:
+            self.console.print(f"[{theme.dim}]{message}[/]")
+        else:
+            print(f"  {message}")
+
     def intervention(self, issue: str, details: dict):
         """Show an intervention required panel."""
         if RICH_AVAILABLE:
@@ -490,6 +497,8 @@ class DeepReportUI:
 
         if failed:
             summary += f" | [{theme.error}]✗ {failed} failed[/]"
+
+        summary += f" | [{theme.dim}]Ctrl+C twice to quit[/]"
 
         return Panel(table, title=f"[bold]🔬 {research_title}[/]",
                      subtitle=summary, border_style=theme.border)

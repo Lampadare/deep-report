@@ -1277,31 +1277,37 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
         (5, "Cleanup", run_cleanup),
     ]
 
-    # Graceful shutdown: 1st Ctrl+C saves + kills agents, 2nd force-exits
-    _ctrl_c_count = [0]
-
-    _saving = [False]
+    # 3-tier Ctrl+C: 1st = warning only, 2nd within 3s = graceful shutdown, 3rd = force kill
+    import time as _time
+    _last_ctrlc = [0.0]
+    _shutting_down = [False]
 
     def _handle_sigint(signum, frame):
-        _ctrl_c_count[0] += 1
-        if _ctrl_c_count[0] == 1:
-            ui.warning("Shutting down gracefully... (Ctrl+C again to force)")
-            _saving[0] = True
-            try:
-                state.save()
-            except Exception:
-                pass
-            finally:
-                _saving[0] = False
-            process_tracker.shutdown(timeout=10)
-            raise KeyboardInterrupt
-        else:
-            if _saving[0]:
-                ui.warning("Saving state, please wait...")
-                return
+        now = _time.monotonic()
+        elapsed = now - _last_ctrlc[0]
+
+        if _shutting_down[0]:
+            # Already shutting down — force kill
             ui.warning("Force killing all agents...")
             process_tracker.shutdown(timeout=0)
             sys.exit(130)
+
+        if elapsed > 3.0:
+            # First press (or expired) — just warn
+            _last_ctrlc[0] = now
+            ui.dim("Press Ctrl+C again within 3s to quit (progress is auto-saved)")
+            return
+
+        # Second press within 3s — graceful shutdown
+        _shutting_down[0] = True
+        ui.warning("Shutting down gracefully...")
+        try:
+            state.save()
+        except Exception:
+            pass
+        process_tracker.shutdown(timeout=10)
+        ui.info(f"Resume with: deep-report --resume {state.report_dir}")
+        raise KeyboardInterrupt
 
     original_handler = signal.signal(signal.SIGINT, _handle_sigint)
 
