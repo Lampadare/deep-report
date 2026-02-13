@@ -524,8 +524,8 @@ class DeepReportUI:
         if table_cost is not None:
             parts.append(f"Cost: ${table_cost:.2f}")
 
-        parts.append(f"[{theme.dim}]Press 'v' for details[/]")
-        parts.append(f"[{theme.dim}]Ctrl+C x2 within 3s to quit[/]")
+        parts.append(f"[{theme.dim}]'v' = verbose[/]")
+        parts.append(f"[{theme.dim}]Ctrl+C x2 = quit[/]")
 
         summary = " | ".join(parts)
 
@@ -686,6 +686,7 @@ class DeepReportUI:
                 title="✨ Success",
                 padding=(1, 2)
             ))
+            self.console.print()
             self._update_title("deep-report: Complete ✓")
         else:
             print()

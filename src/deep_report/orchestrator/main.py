@@ -1314,15 +1314,17 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
     # Set up verbose toggle (press 'v' during execution)
     def on_verbose_toggle(enabled: bool):
         ui.set_verbose(enabled)
-        status = "ON" if enabled else "OFF"
-        ui.info(f"Verbose mode: {status}")
+        if enabled:
+            ui.dim("  verbose output ON — press 'v' again to hide")
+        else:
+            ui.dim("  verbose output OFF")
 
     verbose_toggle = VerboseToggle(on_toggle=on_verbose_toggle)
     toggle_available = verbose_toggle.start()
-    if toggle_available:
-        ui.info("Press 'v' to toggle verbose output")
-    elif ctx.verbose:
-        ui.info("Verbose mode enabled via --verbose flag")
+    if ctx.verbose:
+        ui.dim("  verbose mode on (--verbose)")
+    elif toggle_available:
+        ui.dim("  press 'v' to toggle verbose output")
 
     phases = [
         (1, "Setup", lambda s: True),  # Already done if start_phase > 1
@@ -1389,6 +1391,7 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
                         ui.info("Re-run with verbose mode (press 'v') for full details")
                     if ctx.progress:
                         ctx.progress.error(phase_num, f"{phase_name} failed")
+                    print()
                     return 1
 
                 ui.phase_complete(phase_num, phase_name)
@@ -1416,6 +1419,7 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
                 ui.warning(f"Interrupted during phase {phase_num}")
                 ui.info("Resume with:")
                 ui.dim(f"  deep-report --resume {state.report_dir}")
+                print()
                 return 130
 
             except Exception as e:
@@ -1427,6 +1431,7 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
                     traceback.print_exc()
                 if ctx.progress:
                     ctx.progress.error(phase_num, str(e))
+                print()
                 return 1
     finally:
         signal.signal(signal.SIGINT, original_handler)
