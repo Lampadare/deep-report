@@ -9,20 +9,18 @@ from pathlib import Path
 def check_claude_cli():
     """Verify Claude CLI is available."""
     if not shutil.which("claude"):
-        print("ERROR: Claude CLI not found.")
-        print()
-        print("deep-report requires Claude Code to be installed.")
-        print("Install from: https://claude.ai/download")
-        print()
-        print("After installing, run 'claude' once to authenticate.")
+        from .orchestrator.ui import ui
+        ui.error("Claude CLI not found.")
+        ui.info("deep-report requires Claude Code to be installed.")
+        ui.info("Install from: https://claude.ai/download")
+        ui.info("After installing, run 'claude' once to authenticate.")
         sys.exit(1)
 
 
 def main():
-    # Handle special commands first
+    # Handle --install-skill as alias for --setup-skill
     if "--install-skill" in sys.argv:
-        install_skill()
-        return
+        sys.argv[sys.argv.index("--install-skill")] = "--setup-skill"
 
     if "--version" in sys.argv:
         from . import __version__
@@ -43,6 +41,8 @@ def main():
 
 def install_skill():
     """Install/symlink the Claude Code skill."""
+    from .orchestrator.ui import ui
+
     import deep_report
     skill_src = Path(deep_report.__path__[0]) / "skill"
     skill_dst = Path.home() / ".claude" / "skills" / "deep-report"
@@ -51,10 +51,10 @@ def install_skill():
     skill_dst.parent.mkdir(parents=True, exist_ok=True)
 
     if skill_dst.exists() or skill_dst.is_symlink():
-        print(f"Skill already exists at {skill_dst}")
+        ui.info(f"Skill already exists at {skill_dst}")
         response = input("Replace it? [y/N]: ").strip().lower()
         if response != 'y':
-            print("Cancelled.")
+            ui.info("Cancelled.")
             return
         if skill_dst.is_symlink():
             skill_dst.unlink()
@@ -62,10 +62,14 @@ def install_skill():
             import shutil
             shutil.rmtree(skill_dst)
 
-    skill_dst.symlink_to(skill_src)
-    print(f"Skill installed: {skill_dst} -> {skill_src}")
-    print()
-    print("You can now use /deep-report in Claude Code")
+    try:
+        skill_dst.symlink_to(skill_src)
+    except (OSError, PermissionError) as e:
+        ui.error(f"Could not create skill link: {e}")
+        return
+
+    ui.success(f"Skill installed: {skill_dst} -> {skill_src}")
+    ui.info("You can now use /deep-report in Claude Code")
 
 
 if __name__ == "__main__":

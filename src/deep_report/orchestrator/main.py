@@ -5,8 +5,8 @@ This script orchestrates multi-agent research reports using Claude.
 It manages state, spawns research agents, and synthesizes findings.
 
 Usage:
-    python3 -m orchestrator.main "topic" [options]
-    python3 -m orchestrator.main --resume /path/to/report
+    deep-report "topic" [options]
+    deep-report --resume /path/to/report
 
 By default, an interactive interview runs to configure settings.
 Use --quick to skip the interview and use sensible defaults.
@@ -15,7 +15,7 @@ Options:
     --quick             Skip interview, use defaults (10 agents, sonnet, intermediate)
     --interactive       Pause for approval before research and each iteration
     --model MODEL       Research model: sonnet (default) or opus
-    --agents N          Number of research agents (default: 10, max: 30)
+    --agents N          Number of research agents (default: 10, range: 3-30)
     --refs PATH         Seed references folder or comma-separated URLs
     --download-papers   Download cited open-access papers
     --audio             Generate audio-friendly version
@@ -93,6 +93,7 @@ def _prompt_choice(prompt: str, options: list[str], default: int = 0, allow_othe
         ).ask()
 
         if result is None:  # Ctrl+C or Ctrl+D
+            ui.verbose("Ctrl+C detected, using defaults")
             ui.info(f"Using default: {options[default]}")
             return options[default]
 
@@ -158,7 +159,11 @@ def _prompt_int(prompt: str, default: int, min_val: int, max_val: int) -> int:
             style=custom_style
         ).ask()
 
-        if result is None or result == "":
+        if result is None:
+            ui.verbose("Ctrl+C detected, using defaults")
+            ui.info(f"Using default: {default}")
+            return default
+        if result == "":
             return default
         return int(result)
     else:
@@ -175,6 +180,7 @@ def _prompt_int(prompt: str, default: int, min_val: int, max_val: int) -> int:
             except ValueError:
                 print(f"Please enter a number {min_val}-{max_val}")
             except EOFError:
+                ui.info("Using default settings")
                 return default
 
 
@@ -182,7 +188,10 @@ def _prompt_yes_no(prompt: str, default: bool = True) -> bool:
     """Prompt user for yes/no."""
     if QUESTIONARY_AVAILABLE:
         result = questionary.confirm(prompt, default=default, style=custom_style).ask()
-        return result if result is not None else default
+        if result is None:
+            ui.verbose("Ctrl+C detected, using defaults")
+            return default
+        return result
     else:
         default_str = "Y/n" if default else "y/N"
         try:
@@ -190,16 +199,9 @@ def _prompt_yes_no(prompt: str, default: bool = True) -> bool:
             if response == "":
                 return default
             return response in ("y", "yes")
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):
+            ui.info("Using default settings")
             return default
-
-
-def _truncate_display(text: str, max_len: int = 60) -> str:
-    """Truncate text for display, replacing newlines with spaces."""
-    text = text.replace('\n', ' ').strip()
-    if len(text) <= max_len:
-        return text
-    return text[:max_len - 3] + "..."
 
 
 def _find_seed_folder_candidates(cwd: Path) -> list[tuple[str, int]]:
@@ -282,7 +284,10 @@ def _prompt_seed_folder(cwd: Path) -> Optional[str]:
             ).ask()
         else:
             custom = input("Folder path: ").strip()
-        return custom if custom and Path(custom).is_dir() else None
+        if custom and not Path(custom).is_dir():
+            ui.warning(f"Path not found: {custom}")
+            return None
+        return custom if custom else None
 
     # Extract folder name from choice like "./refs (5 files)"
     folder_name = result.split(" (")[0].lstrip("./")
@@ -358,21 +363,24 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
     # Handle long topics: prompt for short name
     brief = ""
     if len(topic) > 100:
-        print(f"\nTopic preview: {topic[:100]}...")
+        ui.info(f"Topic preview: {ui._truncate(topic, 100)}")
         if QUESTIONARY_AVAILABLE:
             short_name = questionary.text(
                 "Short name for report (used for folder/headers):",
                 style=custom_style
             ).ask() or ""
         else:
-            short_name = input("Short name for report (used for folder/headers): ").strip()
+            try:
+                short_name = input("Short name for report (used for folder/headers): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                short_name = ""
         if short_name:
             brief = topic
             topic = short_name
 
-    ui.step(f"Topic: {_truncate_display(topic, 60)}")
-    print("\nAnswer the following questions to configure your report.")
-    print("Press Enter to accept the default.")
+    ui.step(f"Topic: {ui._truncate(topic, 60)}")
+    ui.info("Answer the following questions to configure your report.")
+    ui.info("Press Enter to accept the default.")
 
     # ─── Report Settings ───
     ui.section_divider("Report Settings")
@@ -438,7 +446,7 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
 
     if existing_refs:
         # Pre-existing refs from --refs flag
-        print(f"Seed references (from --refs): {existing_refs}")
+        ui.info(f"Seed references (from --refs): {existing_refs}")
         if _prompt_yes_no("Use these?", default=True):
             if existing_refs.startswith("http"):
                 seed_urls = [u.strip() for u in existing_refs.split(",")]
@@ -460,10 +468,20 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
             style=custom_style
         ).ask() or ""
     else:
-        urls_input = input("Seed URLs (comma-separated, Enter to skip): ").strip()
+        try:
+            urls_input = input("Seed URLs (comma-separated, Enter to skip): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            urls_input = ""
 
     if urls_input:
-        seed_urls = [u.strip() for u in urls_input.split(",") if u.strip().startswith("http")]
+        for u in urls_input.split(","):
+            u = u.strip()
+            if not u:
+                continue
+            if u.startswith("http"):
+                seed_urls.append(u)
+            else:
+                ui.warning(f"Skipping invalid URL: {u}")
 
     # ─── Advanced ───
     ui.section_divider("Advanced")
@@ -475,8 +493,8 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
     ui.section_divider()
     ui.header("CONFIGURATION SUMMARY")
     ui.config_summary({
-        "Topic": _truncate_display(topic, 50),
-        "Brief": _truncate_display(brief, 50) if brief else "(none)",
+        "Topic": ui._truncate(topic, 50),
+        "Brief": ui._truncate(brief, 50) if brief else "(none)",
         "Report type": report_type,
         "Expertise": expertise,
         "Agents": agent_count,
@@ -535,16 +553,16 @@ def main():
         epilog="""
 Examples:
   # Default - runs interactive interview
-  python3 -m orchestrator.main "Climate change mitigation"
+  deep-report "Climate change mitigation"
 
   # Quick mode - skip interview, use sensible defaults
-  python3 -m orchestrator.main "Climate change mitigation" --quick
+  deep-report "Climate change mitigation" --quick
 
   # Pre-fill interview with specific values
-  python3 -m orchestrator.main "Quantum computing" --agents 15 --model opus
+  deep-report "Quantum computing" --agents 15 --model opus
 
   # Resume interrupted report
-  python3 -m orchestrator.main --resume ~/reports/quantum_20260207_1430
+  deep-report --resume ~/reports/quantum_20260207_1430
         """
     )
     parser.add_argument("topic", nargs="?", help="Research topic")
@@ -556,28 +574,30 @@ Examples:
                         help="Model for research agents (default: sonnet)")
     def _validate_agents(value):
         val = int(value)
-        if val < 1 or val > 50:
-            raise argparse.ArgumentTypeError(f"agents must be between 1 and 50, got {val}")
+        if val < 3 or val > 30:
+            raise argparse.ArgumentTypeError(f"agents must be between 3 and 30, got {val}")
         return val
 
     parser.add_argument("--agents", type=_validate_agents, default=10,
-                        help="Number of research agents (default: 10, max: 50)")
+                        help="Number of research agents (3-30, default: 10)")
     parser.add_argument("--refs", help="Seed references folder or comma-separated URLs")
     parser.add_argument("--download-papers", action="store_true",
                         help="Download cited open-access papers")
     parser.add_argument("--audio", action="store_true",
                         help="Generate audio-friendly version")
     parser.add_argument("--expertise", default="intermediate",
-                        choices=["beginner", "intermediate", "expert"])
+                        choices=["beginner", "intermediate", "expert"],
+                        help="Expertise level (e.g., 'beginner', 'intermediate', 'expert')")
     parser.add_argument("--report-type", default="state-of-the-art",
-                        choices=["state-of-the-art", "tutorial", "comparison", "survey"])
+                        choices=["state-of-the-art", "tutorial", "comparison", "survey"],
+                        help="Report type (e.g., 'state-of-the-art', 'tutorial', 'survey')")
     parser.add_argument("--resume", help="Resume from existing report directory")
     parser.add_argument("--list", "-l", action="store_true",
                         help="List unfinished reports and resume one")
     parser.add_argument("--delete", "-d", action="store_true",
                         help="Delete a report from the registry")
     parser.add_argument("--output", help="Output directory (default: cwd/<topic> or ~/Documents/deep-reports/<topic>)")
-    parser.add_argument("--cwd", help="Original working directory (set by CLI wrapper)")
+    parser.add_argument("--cwd", help=argparse.SUPPRESS)
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Show detailed agent activity (press 'v' during execution to toggle)")
     parser.add_argument("--update", action="store_true",
@@ -629,6 +649,7 @@ Examples:
             if selected:
                 return resume_report(selected, ctx)
 
+        ui.info("Tip: Run 'deep-report --intro' for a getting-started guide")
         parser.error("Topic is required for new reports (or use --resume/--list)")
 
     # Quick mode: skip interview, use sensible defaults
@@ -637,14 +658,17 @@ Examples:
         brief = ""
         # Handle long topics by prompting for short name
         if len(topic) > 100:
-            print(f"\nTopic preview: {topic[:100]}...")
+            ui.info(f"Topic preview: {ui._truncate(topic, 100)}")
             if QUESTIONARY_AVAILABLE:
                 short_name = questionary.text(
                     "Short name for report (used for folder/headers):",
                     style=custom_style
                 ).ask() or ""
             else:
-                short_name = input("Short name for report (used for folder/headers): ").strip()
+                try:
+                    short_name = input("Short name for report (used for folder/headers): ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    short_name = ""
             if short_name:
                 brief = topic
                 topic = short_name
@@ -658,11 +682,15 @@ Examples:
             elif Path(args.refs).is_dir():
                 seed_folder = args.refs
 
+        clamped_agents = max(3, min(args.agents, 30))
+        if clamped_agents != args.agents:
+            ui.warning(f"Agent count adjusted from {args.agents} to {clamped_agents} (valid range: 3-30)")
+
         config = {
             "topic": topic,
             "brief": brief,
             "model": args.model,
-            "agent_count": max(3, min(args.agents, 30)),
+            "agent_count": clamped_agents,
             "seed_urls": seed_urls,
             "seed_refs_folder": seed_folder,
             "download_papers": args.download_papers,  # False by default in quick mode; use --download-papers to enable
@@ -719,7 +747,7 @@ def run_new_report(config: dict, ctx: OrchestratorContext) -> int:
     # Phase 1: Setup
     ui.phase_start(1, "Setup")
     if not run_setup(state, config):
-        ui.error("Setup failed")
+        ui.error("Setup failed. Check the error messages above for details.")
         return 1
     ui.phase_complete(1, "Setup")
 
@@ -788,6 +816,8 @@ def delete_report() -> int:
 
     selected = ui.report_picker_for_delete(reports)
     if selected:
+        if not _prompt_yes_no(f"Delete '{selected.name}'?", default=False):
+            return 0
         if registry.delete(str(selected)):
             ui.success(f"Removed from registry: {selected.name}")
             ui.info("Note: Files on disk were not deleted")
@@ -1026,20 +1056,36 @@ def resume_report(report_dir: Path, ctx: OrchestratorContext) -> int:
     state_file = report_dir / "state" / "orchestrator_state.json"
 
     if not state_file.exists():
-        ui.error(f"No state file found at {state_file}")
+        ui.error("No saved session found. Start a new report with: deep-report '<topic>'")
         return 1
 
     ui.info(f"Resuming report from: {report_dir}")
-    state = State.load(state_file)
+    try:
+        state = State.load(state_file)
+    except RuntimeError as e:
+        ui.error(f"Could not load saved state: {e}")
+        ui.info("Check the backup file or start fresh with: deep-report --delete")
+        return 1
+    except OSError as e:
+        ui.error(f"Could not read state file: {e}")
+        return 1
 
     # Initialize context
     ctx.init_for_report(report_dir)
 
     # Determine where to resume
+    _step_display_names = {
+        "phase_1_complete": "Setup",
+        "phase_2_complete": "Planning",
+        "phase_3_complete": "Research",
+        "phase_4_complete": "Synthesis",
+        "phase_5_complete": "Cleanup",
+    }
     current_phase = state.current_phase
     target_phase = current_phase + 1
     ui.info(f"Last completed phase: {current_phase}")
-    ui.info(f"Last step: {state.current_step}")
+    step_display = _step_display_names.get(state.current_step, state.current_step)
+    ui.info(f"Last step: {step_display}")
 
     # Check if report is already complete
     if current_phase >= 5:
@@ -1076,7 +1122,7 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
     verbose_toggle = VerboseToggle(on_toggle=on_verbose_toggle)
     toggle_available = verbose_toggle.start()
     if toggle_available:
-        ui.verbose("Press 'v' to toggle verbose output")
+        ui.info("Press 'v' to toggle verbose output")
     elif ctx.verbose:
         ui.info("Verbose mode enabled via --verbose flag")
 
@@ -1091,14 +1137,25 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
     # Graceful shutdown: 1st Ctrl+C saves + kills agents, 2nd force-exits
     _ctrl_c_count = [0]
 
+    _saving = [False]
+
     def _handle_sigint(signum, frame):
         _ctrl_c_count[0] += 1
         if _ctrl_c_count[0] == 1:
             ui.warning("Shutting down gracefully... (Ctrl+C again to force)")
-            state.save()
+            _saving[0] = True
+            try:
+                state.save()
+            except Exception:
+                pass
+            finally:
+                _saving[0] = False
             process_tracker.shutdown(timeout=10)
             raise KeyboardInterrupt
         else:
+            if _saving[0]:
+                ui.warning("Saving state, please wait...")
+                return
             ui.warning("Force killing all agents...")
             process_tracker.shutdown(timeout=0)
             sys.exit(130)
@@ -1119,6 +1176,9 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
 
                 if not success:
                     ui.error(f"Phase {phase_num} ({phase_name}) failed")
+                    ui.info(f"You can resume from this phase with: deep-report --resume")
+                    if not ctx.verbose:
+                        ui.info("Re-run with verbose mode (press 'v') for full details")
                     if ctx.progress:
                         ctx.progress.error(phase_num, f"{phase_name} failed")
                     return 1

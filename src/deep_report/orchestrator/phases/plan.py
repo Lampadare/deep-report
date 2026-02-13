@@ -65,7 +65,7 @@ def run_plan(state: State) -> bool:
     state.mark_phase_complete(2)
 
     ui.info(f"{len(state.threads)} research threads planned")
-    ui.info(f"Estimated cost: ${state.estimated_cost:.2f}")
+    ui.info(f"Estimated cost: ${state.estimated_cost:.2f} (based on {len(state.threads)} agents, model: {state.research_model}, includes 20% buffer)")
     return True
 
 

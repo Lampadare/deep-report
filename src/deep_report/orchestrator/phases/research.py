@@ -14,6 +14,7 @@ from ..utils import (
     AgentResult,
     AGENT_TOOLS,
     DEFAULT_TIMEOUT,
+    DECISION_TIMEOUT,
 )
 from ..approval import ApprovalGate
 from ..progress import ProgressWriter
@@ -130,7 +131,7 @@ def run_research(
             summaries = _gather_all_summaries(report_dir)
             # Use brief if available (detailed research instructions), otherwise topic
             decision_topic = state.brief or state.topic
-            with ui.spinner_task("Decision agent evaluating coverage..."):
+            with ui.spinner_task(f"Decision agent evaluating coverage (up to {DECISION_TIMEOUT // 60} min)..."):
                 decision = spawn_decision_agent(
                     summaries=summaries,
                     topic=decision_topic,
@@ -254,7 +255,9 @@ def _run_research_batch(
     thread_info = [{"id": t["id"], "title": t.get("title", t["id"])[:30]} for t in tasks]
     ui.research_table_start(thread_info, title=f"RESEARCH AGENTS (Iteration {iteration})")
 
-    # Mark first batch as running (up to max_workers)
+    # Mark first batch as running (up to max_workers).
+    # NOTE: This is an approximation — ThreadPoolExecutor may not start all
+    # of these immediately, but it gives the user a reasonable visual estimate.
     max_workers = 10
     for t in thread_info[:max_workers]:
         ui.research_table_update(t["id"], "running")
@@ -456,8 +459,10 @@ CRITICAL: You MUST call Write tool with file_path="{summary_file}" to save your 
         ui.agent_progress_update(current, f"{task_id}: {status}")
         ui.verbose(f"Summary {task_id}: {status}")
 
-    summary_results = spawn_agents_parallel(tasks, max_workers=10, on_complete=on_complete)
-    ui.agent_progress_complete(f"Summarized {len(tasks)} outputs")
+    try:
+        summary_results = spawn_agents_parallel(tasks, max_workers=10, on_complete=on_complete)
+    finally:
+        ui.agent_progress_complete(f"Summarized {len(tasks)} outputs")
 
     failed = [tid for tid, r in summary_results.items() if not r.success]
     if failed:

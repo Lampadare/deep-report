@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Keyboard listener for real-time input during execution."""
 
+import atexit
 import os
 import sys
 import threading
@@ -67,7 +68,9 @@ class KeyboardListener:
         self._running = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
-            self._thread = None
+            # Thread is daemon, so it won't block process exit even if
+            # still alive (e.g. blocked on select/read after join timeout)
+        self._thread = None
 
     def _listen(self):
         """Main listening loop - runs in background thread."""
@@ -92,6 +95,15 @@ class KeyboardListener:
 
         old_settings = termios.tcgetattr(fd)
 
+        # Register atexit handler to restore terminal on unexpected exit
+        def _restore_terminal():
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            except Exception:
+                pass
+
+        atexit.register(_restore_terminal)
+
         try:
             tty.setcbreak(fd)  # Use cbreak for better signal handling
 
@@ -112,6 +124,8 @@ class KeyboardListener:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
             except Exception:
                 pass
+            # Unregister atexit handler since we restored manually
+            atexit.unregister(_restore_terminal)
             if should_close:
                 try:
                     input_file.close()

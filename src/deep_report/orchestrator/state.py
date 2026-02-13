@@ -228,7 +228,8 @@ class State:
                         pass
                     raise
             except OSError as e:
-                print(f"Warning: Failed to save state: {e}")
+                from .ui import ui
+                ui.warning(f"Failed to save state: {e}")
                 raise
 
     @classmethod
@@ -249,7 +250,8 @@ class State:
                 # Validate and sanitize data
                 validated_data, warnings = validate_state_data(data)
                 for warning in warnings:
-                    print(f"State validation warning: {warning}")
+                    from .ui import ui
+                    ui.warning(f"State validation: {warning}")
 
                 for key, value in validated_data.items():
                     if hasattr(state, key) and key != "_state_file":
@@ -260,10 +262,15 @@ class State:
                 try:
                     import shutil
                     shutil.copy2(state_file, backup_path)
-                    print(f"Warning: Corrupted state backed up to {backup_path}")
+                    from .ui import ui
+                    ui.warning(f"Corrupted state backed up to {backup_path}")
                 except OSError:
                     pass
-                raise RuntimeError(f"Corrupted state file {state_file}: {e}") from e
+                raise RuntimeError(
+                    f"State file corrupted ({state_file}). "
+                    f"A backup may exist at {backup_path}. "
+                    f"You can delete the state file and restart, or restore from the backup."
+                ) from e
             except KeyError as e:
                 # Backup corrupted file before raising
                 bak_path = state_file.with_suffix('.key_error.bak')
@@ -272,7 +279,11 @@ class State:
                     shutil.copy2(state_file, bak_path)
                 except OSError:
                     pass
-                raise RuntimeError(f"Invalid state file (backup at {bak_path}): missing key {e}") from e
+                raise RuntimeError(
+                    f"State file has missing data (key {e}). "
+                    f"A backup was saved to {bak_path}. "
+                    f"You can delete the state file and restart, or restore from the backup."
+                ) from e
         else:
             state.created_at = datetime.now().isoformat()
             state.save()
@@ -319,7 +330,8 @@ class State:
                     complete=(phase >= 5)
                 )
             except Exception as e:
-                print(f"Warning: Registry update failed: {e}")
+                from .ui import ui
+                ui.warning(f"Registry update failed: {e}")
 
     def checkpoint(self, step: str):
         """Create a checkpoint at the current step."""

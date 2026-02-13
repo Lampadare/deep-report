@@ -14,6 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Callable
 from dataclasses import dataclass
 
+from ..ui import ui
+
 
 # Default timeouts (tripled to handle memory pressure and complex tasks)
 DEFAULT_TIMEOUT = 5400  # 90 minutes for research/synthesis
@@ -137,7 +139,7 @@ class CircuitBreaker:
 
         # Sleep outside lock to avoid blocking other threads
         if remaining > 0:
-            print(f"  Circuit breaker open, waiting {remaining:.0f}s...")
+            ui.verbose(f"Circuit breaker open, waiting {remaining:.0f}s...")
             time.sleep(remaining)
 
         # Re-acquire lock and re-check state before resetting
@@ -421,7 +423,8 @@ def spawn_agent_with_retry(
         # Exponential backoff before retry
         if attempt < max_retries - 1:
             wait_time = backoff_base * (2 ** attempt)
-            print(f"  Retry {attempt+1}/{max_retries} in {wait_time:.0f}s... (error: {result.error[:50]})")
+            err_msg = str(result.error)[:100] + ("..." if len(str(result.error)) > 100 else "")
+            ui.verbose(f"Retry {attempt+1}/{max_retries} in {wait_time:.0f}s... (error: {err_msg})")
             time.sleep(wait_time)
 
     return AgentResult(
@@ -493,7 +496,7 @@ def spawn_agents_parallel(
             else:
                 is_open = cb.record_failure()
                 if is_open:
-                    print(f"  Circuit breaker opened after {cb.failure_threshold} consecutive failures")
+                    ui.verbose(f"Circuit breaker opened after {cb.failure_threshold} consecutive failures")
 
             results[task_id] = result
 
@@ -501,7 +504,7 @@ def spawn_agents_parallel(
                 try:
                     on_complete(task_id, result)
                 except Exception as e:
-                    print(f"  Warning: on_complete callback failed for {task_id}: {e}")
+                    ui.warning(f"on_complete callback failed for {task_id}: {e}")
 
     return results
 
@@ -551,7 +554,7 @@ Be conservative - only request more research if genuinely needed.
     )
 
     if not result.success:
-        # Default to sufficient if agent fails
+        ui.warning("Decision agent failed, continuing research as fallback")
         return {"sufficient": True, "reasoning": "Decision agent failed", "gaps": [], "conflicts": [], "deepen": []}
 
     # Parse JSON from output
@@ -560,6 +563,7 @@ Be conservative - only request more research if genuinely needed.
         return parsed
 
     # Default if parsing fails
+    ui.warning("Decision agent output could not be parsed, continuing research as fallback")
     return {"sufficient": True, "reasoning": "Could not parse decision", "gaps": [], "conflicts": [], "deepen": []}
 
 

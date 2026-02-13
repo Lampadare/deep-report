@@ -19,6 +19,7 @@ except ImportError:
     RICH_AVAILABLE = False
 
 from .progress import ProgressWriter
+from .ui import ui
 from .utils import RoleEnforcer
 
 
@@ -68,87 +69,91 @@ class ApprovalGate:
         try:
             self.approval_file.parent.mkdir(parents=True, exist_ok=True)
             self.approval_file.write_text(json.dumps(request, indent=2))
-        except Exception:
-            pass
+        except Exception as e:
+            ui.warning(f"Could not save approval state: {e}")
 
         if self.progress:
             self.progress.approval_waiting(gate_id)
 
         # Display to user with Rich if available
-        if RICH_AVAILABLE:
-            console = Console()
-            console.print()
+        while True:
+            if RICH_AVAILABLE:
+                console = Console()
+                console.print()
 
-            # Build metadata table
-            table = Table(show_header=False, box=None, padding=(0, 2))
-            table.add_column("Key", style="dim cyan")
-            table.add_column("Value", style="white")
+                # Build metadata table
+                table = Table(show_header=False, box=None, padding=(0, 2))
+                table.add_column("Key", style="dim cyan")
+                table.add_column("Value", style="white")
 
-            for key, value in metadata.items():
-                if isinstance(value, list):
-                    if value:
-                        value = "\n".join(f"• {v}" for v in value)
-                    else:
-                        value = "(none)"
-                elif isinstance(value, dict):
-                    value = json.dumps(value, indent=2)
-                key_display = key.replace("_", " ").title()
-                table.add_row(key_display, str(value))
+                for key, value in metadata.items():
+                    if isinstance(value, list):
+                        if value:
+                            value = "\n".join(f"• {v}" for v in value)
+                        else:
+                            value = "(none)"
+                    elif isinstance(value, dict):
+                        value = json.dumps(value, indent=2)
+                    key_display = key.replace("_", " ").title()
+                    table.add_row(key_display, str(value))
 
-            # Create panel with table
-            console.print(Panel(
-                table,
-                title=f"[bold yellow]⏸ APPROVAL REQUIRED[/]",
-                subtitle=f"[dim]{gate_id}[/]",
-                border_style="yellow",
-                padding=(1, 2)
-            ))
+                # Create panel with table
+                console.print(Panel(
+                    table,
+                    title=f"[bold yellow]⏸ APPROVAL REQUIRED[/]",
+                    subtitle=f"[dim]{gate_id}[/]",
+                    border_style="yellow",
+                    padding=(1, 2)
+                ))
 
-            # Options
-            console.print()
-            console.print("[bold]Options:[/]")
-            console.print("  [green]y[/] / [green]Enter[/]  Approve and continue")
-            console.print("  [yellow]n[/]          Reject (skip this step)")
-            console.print("  [red]q[/]          Quit orchestrator")
-            console.print()
+                # Options
+                console.print()
+                console.print("[bold]Options:[/]")
+                console.print("  [green]y[/] / [green]Enter[/]  Approve and continue")
+                console.print("  [yellow]n[/]          Reject (skip this step)")
+                console.print("  [red]q[/]          Quit orchestrator")
+                console.print()
 
-            try:
-                response = console.input("[bold]Approve?[/] (y): ").strip().lower()
-            except EOFError:
-                console.print("\n[yellow]No input available, defaulting to reject[/]")
-                response = 'n'
-        else:
-            # Fallback to plain text
-            print(f"\n{'='*60}")
-            print(f"APPROVAL REQUIRED: {gate_id}")
-            print(f"{'='*60}")
-            for key, value in metadata.items():
-                if isinstance(value, (list, dict)):
-                    value = json.dumps(value, indent=2)
-                print(f"  {key}: {value}")
-            print(f"{'='*60}")
-            print("\nOptions:")
-            print("  [y/Enter] Approve and continue")
-            print("  [n]       Reject (skip this step)")
-            print("  [q]       Quit orchestrator")
-            print()
+                try:
+                    response = console.input("[bold]Approve?[/] (y): ").strip().lower()
+                except EOFError:
+                    console.print("\n[yellow]No input available, defaulting to reject[/]")
+                    response = 'n'
+            else:
+                # Fallback to plain text
+                print(f"\n{'='*60}")
+                print(f"APPROVAL REQUIRED: {gate_id}")
+                print(f"{'='*60}")
+                for key, value in metadata.items():
+                    if isinstance(value, (list, dict)):
+                        value = json.dumps(value, indent=2)
+                    print(f"  {key}: {value}")
+                print(f"{'='*60}")
+                print("\nOptions:")
+                print("  [y/Enter] Approve and continue")
+                print("  [n]       Reject (skip this step)")
+                print("  [q]       Quit orchestrator")
+                print()
 
-            try:
-                response = input("Approve? [y/n/q]: ").strip().lower()
-            except EOFError:
-                print("\nNo input available, defaulting to reject")
-                response = 'n'
+                try:
+                    response = input("Approve? [y/n/q]: ").strip().lower()
+                except EOFError:
+                    print("\nNo input available, defaulting to reject")
+                    response = 'n'
 
-        # Explicit handling of responses to avoid double approval on empty input
-        if response == 'q':
-            approved = False
-        elif response in ('n', 'no'):
-            approved = False
-        elif response in ('y', 'yes', ''):
-            approved = True
-        else:
-            # Treat unexpected input as rejection
-            approved = False
+            # Explicit handling of responses to avoid double approval on empty input
+            if response == 'q':
+                approved = False
+                break
+            elif response in ('n', 'no'):
+                approved = False
+                break
+            elif response in ('y', 'yes', ''):
+                approved = True
+                break
+            else:
+                ui.warning(f"Unrecognized input '{response}'. Please enter y, n, or q.")
+                continue
 
         if response == 'q':
             request["status"] = "quit"

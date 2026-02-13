@@ -32,11 +32,11 @@ def run_synthesize(state: State) -> bool:
     # Determine synthesis strategy
     if agent_count <= 10:
         state.synthesis_strategy = "single"
-        ui.step(f"Using single-pass synthesis for {agent_count} agents")
+        ui.step(f"Synthesizing report from {agent_count} agents")
         success = _single_pass_synthesis(state, report_dir)
     else:
         state.synthesis_strategy = "multi"
-        ui.step(f"Using multi-pass synthesis for {agent_count} agents")
+        ui.step(f"Synthesizing report from {agent_count} agents (multiple refinement passes)")
         success = _multi_pass_synthesis(state, report_dir)
 
     if not success:

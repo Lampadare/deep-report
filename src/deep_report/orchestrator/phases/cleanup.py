@@ -215,6 +215,24 @@ def _finalize_manifest(state: State, metrics: dict):
 def _print_summary(state: State, metrics: dict, report_dir: Path):
     """Print final summary to console."""
 
+    # Compute elapsed wall-clock time if we have a start timestamp
+    elapsed_str = None
+    if state.created_at:
+        try:
+            start = datetime.fromisoformat(state.created_at)
+            end = datetime.fromisoformat(metrics['completed_at'])
+            elapsed_secs = (end - start).total_seconds()
+            if elapsed_secs >= 3600:
+                hours = int(elapsed_secs // 3600)
+                mins = int((elapsed_secs % 3600) // 60)
+                elapsed_str = f"{hours}h {mins}m"
+            elif elapsed_secs >= 60:
+                elapsed_str = f"{int(elapsed_secs // 60)}m {int(elapsed_secs % 60)}s"
+            else:
+                elapsed_str = f"{int(elapsed_secs)}s"
+        except (ValueError, TypeError):
+            pass
+
     stats = {
         "Report": f"{metrics['report_word_count']:,} words",
         "Raw research": f"{metrics['raw_research_words']:,} words",
@@ -222,6 +240,9 @@ def _print_summary(state: State, metrics: dict, report_dir: Path):
         "Iterations": metrics['research_iterations'],
         "Estimated cost": f"${metrics['estimated_cost']:.2f}",
     }
+
+    if elapsed_str:
+        stats["Total time"] = elapsed_str
 
     if metrics["audio_generated"]:
         stats["Audio"] = f"{metrics.get('audio_word_count', 0):,} words"

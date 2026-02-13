@@ -7,6 +7,7 @@ Falls back gracefully if Rich is not installed.
 
 from typing import Optional
 from contextlib import contextmanager
+import logging
 import sys
 
 # Try to import Rich, fall back to plain text if not available
@@ -91,7 +92,10 @@ class DeepReportUI:
         if not self._verbose:
             return
         if RICH_AVAILABLE:
-            self.console.print(f"[dim]{message}[/]")
+            if self._research_live and getattr(self._research_live, 'is_started', False):
+                self._research_live.console.print(f"[dim]{message}[/]")
+            else:
+                self.console.print(f"[dim]{message}[/]")
         else:
             print(f"  [V] {message}")
 
@@ -101,6 +105,19 @@ class DeepReportUI:
         if len(text) <= max_len:
             return text
         return text[:max_len - 3] + "..."
+
+    @staticmethod
+    def _picker_style(accent: str = "cyan"):
+        """Return a questionary Style for picker dialogs."""
+        from questionary import Style
+        return Style([
+            ('qmark', f'fg:{accent} bold'),
+            ('question', 'fg:white bold'),
+            ('answer', f'fg:#87d787 bold' if accent == 'cyan' else f'fg:{accent} bold'),
+            ('pointer', f'fg:{accent} bold'),
+            ('highlighted', f'fg:{accent} bold'),
+            ('selected', f'fg:#87d787' if accent == 'cyan' else f'fg:{accent}'),
+        ])
 
     def _print(self, message: str, style: str = None):
         """Print with optional styling."""
@@ -135,7 +152,8 @@ class DeepReportUI:
     def interview_header(self):
         """Show colorful banner for configure mode."""
         if RICH_AVAILABLE:
-            self.console.clear()  # Start with clean slate
+            if sys.stdout.isatty():
+                self.console.clear()  # Start with clean slate
             self.console.print()  # Top padding
             title = Text("🔬 DEEP REPORT CONFIGURATION", style="bold white")
             self.console.print(Panel(
@@ -145,9 +163,6 @@ class DeepReportUI:
                 subtitle="[dim]Use ↑↓ arrows to navigate, Enter to select[/]"
             ))
         else:
-            # Clear screen for non-Rich terminals
-            print("\033[2J\033[H", end="")
-            print()
             print("=" * 60)
             print("DEEP REPORT CONFIGURATION")
             print("Use Up/Down arrows to navigate, Enter to select")
@@ -301,7 +316,7 @@ class DeepReportUI:
                 print(f"  [{completed}/{self._plain_total}] {current}")
 
     def agent_progress_complete(self, message: str = "Complete"):
-        """Complete agent progress tracking."""
+        """Complete agent progress tracking. Safe to call multiple times."""
         if RICH_AVAILABLE and self._live:
             try:
                 self._live.stop()
@@ -311,7 +326,7 @@ class DeepReportUI:
                 self._progress = None
                 self._live = None
                 self._task_id = None
-        self.success(message)
+            self.success(message)
 
     @contextmanager
     def spinner_task(self, message: str):
@@ -355,7 +370,7 @@ class DeepReportUI:
         with self._status_lock:
             table = Table(show_header=True, box=ROUNDED)
             table.add_column("#", width=4, justify="right")
-            table.add_column("Thread", width=32)
+            table.add_column("Agent", width=32)
             table.add_column("Status", width=20)
 
             char = SPINNER_CHARS[self._spinner_frame % len(SPINNER_CHARS)]
@@ -363,7 +378,7 @@ class DeepReportUI:
 
             for i, thread in enumerate(self._threads, 1):
                 tid = thread["id"]
-                title = thread.get("title", tid)[:30]
+                title = self._truncate(thread.get("title", tid), 30)
                 status = self._thread_status.get(tid, "pending")
 
                 if status == "pending":
@@ -386,7 +401,7 @@ class DeepReportUI:
 
         summary = f"Progress: {complete}/{total} complete"
         if failed:
-            summary += f" | [red]{failed} failed[/]"
+            summary += f" | [red]✗ {failed} failed[/]"
 
         return Panel(table, title=f"[bold]🔬 {self._research_title}[/]",
                      subtitle=summary, border_style="blue")
@@ -403,7 +418,7 @@ class DeepReportUI:
             try:
                 self._research_live.update(_SpinnerTable(self._build_research_table))
             except Exception:
-                pass
+                logging.debug("research_table_update failed", exc_info=True)
         elif not RICH_AVAILABLE:
             symbol = "✓" if status == "complete" else "✗" if status == "failed" else "⠋"
             print(f"  [{symbol}] {thread_id}: {status}")
@@ -428,7 +443,7 @@ class DeepReportUI:
             self._spinner_frame = 0
 
     def research_table_complete(self):
-        """Finalize and close the live table."""
+        """Finalize and close the live table. Safe to call multiple times."""
         if RICH_AVAILABLE and self._research_live:
             try:
                 self._research_live.stop()
@@ -437,15 +452,37 @@ class DeepReportUI:
             finally:
                 self._research_live = None
 
-        with self._status_lock:
-            complete = sum(1 for s in self._thread_status.values() if s == "complete")
-            failed = sum(1 for s in self._thread_status.values() if s == "failed")
-            total = len(self._thread_status)
+            with self._status_lock:
+                complete = sum(1 for s in self._thread_status.values() if s == "complete")
+                failed = sum(1 for s in self._thread_status.values() if s == "failed")
+                total = len(self._thread_status)
 
-        if failed:
-            self.warning(f"Research: {complete}/{total} succeeded, {failed} failed")
-        else:
-            self.success(f"Research: {complete}/{total} succeeded")
+            if failed:
+                self.warning(f"Research: {complete}/{total} succeeded, {failed} failed")
+            else:
+                self.success(f"Research: {complete}/{total} succeeded")
+
+        self.cleanup_thread_metadata()
+
+    def ensure_live_stopped(self):
+        """Stop all live displays if running. Call from exception handlers."""
+        if self._live:
+            try:
+                self._live.stop()
+            except Exception:
+                pass
+            finally:
+                self._progress = None
+                self._live = None
+                self._task_id = None
+        if self._research_live:
+            try:
+                self._research_live.stop()
+            except Exception:
+                pass
+            finally:
+                self._research_live = None
+        self.cleanup_thread_metadata()
 
     def decision(self, iteration: int, sufficient: bool, reasoning: str):
         """Display decision agent result."""
@@ -480,8 +517,8 @@ class DeepReportUI:
         else:
             print("\n=== RESEARCH PLAN ===")
             for i, thread in enumerate(threads, 1):
-                title = thread.get("title", thread.get("id", ""))[:40]
-                objective = thread.get("objective", "")[:50]
+                title = self._truncate(thread.get("title", thread.get("id", "")), 40)
+                objective = self._truncate(thread.get("objective", ""), 50)
                 print(f"  {i:2d}. {title}")
                 print(f"      {objective}")
             print()
@@ -560,16 +597,6 @@ class DeepReportUI:
         # Use questionary to pick if available
         try:
             import questionary
-            from questionary import Style
-
-            custom_style = Style([
-                ('qmark', 'fg:cyan bold'),
-                ('question', 'fg:white bold'),
-                ('answer', 'fg:#87d787 bold'),
-                ('pointer', 'fg:cyan bold'),
-                ('highlighted', 'fg:cyan bold'),
-                ('selected', 'fg:#87d787'),
-            ])
 
             choices = [f"{r['topic'][:40]} ({r['phase']}/5)" for r in reports]
             choices.append("Cancel")
@@ -577,7 +604,7 @@ class DeepReportUI:
             result = questionary.select(
                 "Select report to resume:",
                 choices=choices,
-                style=custom_style
+                style=self._picker_style("cyan")
             ).ask()
 
             if result == "Cancel" or result is None:
@@ -597,7 +624,9 @@ class DeepReportUI:
                     if 0 <= idx < len(reports):
                         return Path(reports[idx]["path"])
                     print(f"Please enter 1-{len(reports)}")
-                except (ValueError, EOFError):
+                except ValueError:
+                    print(f"Please enter a number 1-{len(reports)}")
+                except EOFError:
                     return None
 
 
@@ -653,16 +682,6 @@ class DeepReportUI:
         # Use questionary to pick
         try:
             import questionary
-            from questionary import Style
-
-            custom_style = Style([
-                ('qmark', 'fg:red bold'),
-                ('question', 'fg:white bold'),
-                ('answer', 'fg:red bold'),
-                ('pointer', 'fg:red bold'),
-                ('highlighted', 'fg:red bold'),
-                ('selected', 'fg:red'),
-            ])
 
             choices = [f"{r['topic'][:40]} ({r['phase']}/5)" for r in reports]
             choices.append("Cancel")
@@ -670,7 +689,7 @@ class DeepReportUI:
             result = questionary.select(
                 "Select report to DELETE from registry:",
                 choices=choices,
-                style=custom_style
+                style=self._picker_style("red")
             ).ask()
 
             if result == "Cancel" or result is None:
@@ -689,7 +708,9 @@ class DeepReportUI:
                     if 0 <= idx < len(reports):
                         return Path(reports[idx]["path"])
                     print(f"Please enter 1-{len(reports)}")
-                except (ValueError, EOFError):
+                except ValueError:
+                    print(f"Please enter a number 1-{len(reports)}")
+                except EOFError:
                     return None
 
 
