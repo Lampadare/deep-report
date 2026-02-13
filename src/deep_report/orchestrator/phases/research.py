@@ -457,10 +457,10 @@ Use WebSearch and WebFetch to find authoritative sources. Prioritize:
 - Recent data (prefer last 3-5 years unless foundational)
 
 ## Resilience Rules
-- If a WebFetch call fails (403, timeout, sibling error), do NOT retry it. Continue with your other results.
-- WebSearch results alone are sufficient to write a thorough report. WebFetch is a bonus, not a requirement.
+- If a WebFetch call fails (403, timeout, sibling error), do NOT retry it. Move on to your next search or fetch — there are plenty of other sources to explore.
+- Failed fetches should not interrupt your research flow. Keep searching, keep fetching other URLs, and only write the report once you have gathered enough material.
 - NEVER produce empty or placeholder responses like "No response requested."
-- You MUST write the output file even if some or all fetches fail.
+- You MUST write the output file even if some fetches fail — use everything you successfully gathered.
 - Always complete your task. Never stall or wait for external input.
 
 CRITICAL: You MUST call Write tool with file_path="{output_file}" to save your research.
