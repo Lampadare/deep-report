@@ -363,7 +363,7 @@ def _run_research_batch(
     results = spawn_agents_parallel(tasks, max_workers=max_workers, on_complete=on_complete,
                                      intervention_handler=intervention_handler,
                                      stream_callback_factory=make_stream_cb if ui._verbose else None,
-                                     stagger_secs=30.0,
+                                     stagger_secs=60.0,
                                      log_dir=log_dir)
     ui.research_table_complete()
 
