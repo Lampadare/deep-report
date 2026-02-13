@@ -77,52 +77,57 @@ def run_research(
             threads_to_run = state.get_pending_followups()
 
         if not threads_to_run:
-            ui.info("No threads to run, skipping iteration")
-            break
-
-        # Run research agents in parallel
-        ui.step(f"Spawning {len(threads_to_run)} research agents")
-        if progress:
-            progress.update(3, f"Spawning agents", f"{len(threads_to_run)} agents")
-
-        results = _run_research_batch(
-            state, threads_to_run, scope_content, seed_context, iteration, progress,
-            intervention_handler=intervention_handler,
-        )
-
-        # Update state with completed/failed
-        for thread_id, result in results.items():
-            if result.success:
-                if thread_id.startswith("followup_"):
-                    _mark_followup_complete(state, thread_id, result)
-                    if thread_id not in state.completed_threads:
-                        state.completed_threads.append(thread_id)
-                else:
-                    if thread_id not in state.completed_threads:
-                        state.completed_threads.append(thread_id)
-                    state.update_thread(thread_id, status="completed", output_file=result.output_file)
+            # Resume case: batch already completed but decision agent never ran
+            if state.completed_threads:
+                ui.info(f"{len(state.completed_threads)} threads already completed — evaluating coverage")
+                # Skip batch+summarize, fall through to decision agent below
             else:
-                if thread_id.startswith("followup_"):
-                    _mark_followup_failed(state, thread_id, result.error)
-                    if thread_id not in state.failed_threads:
-                        state.failed_threads.append(thread_id)
+                ui.info("No threads to run, ending research")
+                break
+        else:
+            # Run research agents in parallel
+            ui.step(f"Spawning {len(threads_to_run)} research agents")
+            if progress:
+                progress.update(3, f"Spawning agents", f"{len(threads_to_run)} agents")
+
+            results = _run_research_batch(
+                state, threads_to_run, scope_content, seed_context, iteration, progress,
+                intervention_handler=intervention_handler,
+            )
+
+            # Update state with completed/failed
+            for thread_id, result in results.items():
+                if result.success:
+                    if thread_id.startswith("followup_"):
+                        _mark_followup_complete(state, thread_id, result)
+                        if thread_id not in state.completed_threads:
+                            state.completed_threads.append(thread_id)
+                    else:
+                        if thread_id not in state.completed_threads:
+                            state.completed_threads.append(thread_id)
+                        state.update_thread(thread_id, status="completed", output_file=result.output_file)
                 else:
-                    if thread_id not in state.failed_threads:
-                        state.failed_threads.append(thread_id)
-                    state.update_thread(thread_id, status="failed")
-                ui.warning(f"Thread {thread_id} failed: {result.error[:80]}")
-                if progress:
-                    progress.error(3, f"Thread {thread_id}: {result.error[:100]}")
+                    if thread_id.startswith("followup_"):
+                        _mark_followup_failed(state, thread_id, result.error)
+                        if thread_id not in state.failed_threads:
+                            state.failed_threads.append(thread_id)
+                    else:
+                        if thread_id not in state.failed_threads:
+                            state.failed_threads.append(thread_id)
+                        state.update_thread(thread_id, status="failed")
+                    ui.warning(f"Thread {thread_id} failed: {result.error[:80]}")
+                    if progress:
+                        progress.error(3, f"Thread {thread_id}: {result.error[:100]}")
 
-        state.save()
-        state.checkpoint(f"research_batch_{iteration}_complete")
+            state.save()
+            state.checkpoint(f"research_batch_{iteration}_complete")
 
-        # Summarize all new outputs
-        ui.step("Summarizing research outputs")
-        if progress:
-            progress.update(3, "Summarizing", f"{len(results)} outputs")
-        _summarize_outputs(state, results)
-        state.checkpoint(f"summaries_{iteration}_complete")
+            # Summarize all new outputs
+            ui.step("Summarizing research outputs")
+            if progress:
+                progress.update(3, "Summarizing", f"{len(results)} outputs")
+            _summarize_outputs(state, results)
+            state.checkpoint(f"summaries_{iteration}_complete")
 
         # Decision agent: should we go deeper?
         if iteration < max_iterations:

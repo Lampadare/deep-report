@@ -1347,13 +1347,13 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
 
         # Second press within 3s — graceful shutdown
         _shutting_down[0] = True
+        ui.ensure_live_stopped()
         ui.warning("Shutting down gracefully...")
         try:
             state.save()
         except Exception:
             pass
         process_tracker.shutdown(timeout=10)
-        ui.info(f"Resume with: deep-report --resume {state.report_dir}")
         raise KeyboardInterrupt
 
     original_handler = signal.signal(signal.SIGINT, _handle_sigint)
@@ -1375,7 +1375,8 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
 
                 if not success:
                     ui.error(f"Phase {phase_num} ({phase_name}) failed")
-                    ui.info(f"Resume with: deep-report --resume {state.report_dir}")
+                    ui.info("Resume with:")
+                    ui.dim(f"  deep-report --resume {state.report_dir}")
                     if not ctx.verbose:
                         ui.info("Re-run with verbose mode (press 'v') for full details")
                     if ctx.progress:
@@ -1405,12 +1406,14 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
 
             except KeyboardInterrupt:
                 ui.warning(f"Interrupted during phase {phase_num}")
-                ui.info(f"Resume with: deep-report --resume {state.report_dir}")
+                ui.info("Resume with:")
+                ui.dim(f"  deep-report --resume {state.report_dir}")
                 return 130
 
             except Exception as e:
                 ui.error(f"Unexpected error: {e}")
-                ui.info(f"Resume with: deep-report --resume {state.report_dir}")
+                ui.info("Resume with:")
+                ui.dim(f"  deep-report --resume {state.report_dir}")
                 if ctx.verbose:
                     import traceback
                     traceback.print_exc()

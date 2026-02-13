@@ -334,7 +334,8 @@ def spawn_agent(
                 estimated_cost=_COST_PER_SEC.get(model, 0.004) * timeout_secs,
             )
         finally:
-            process_tracker.unregister(process.pid)
+            if not process_tracker.is_shutting_down:
+                process_tracker.unregister(process.pid)
 
         duration = time.time() - start
 
@@ -388,7 +389,8 @@ def spawn_agent(
                 process.wait()
             except Exception:
                 pass
-            process_tracker.unregister(process.pid)
+            if not process_tracker.is_shutting_down:
+                process_tracker.unregister(process.pid)
         elapsed = time.time() - start
         return AgentResult(
             success=False,
