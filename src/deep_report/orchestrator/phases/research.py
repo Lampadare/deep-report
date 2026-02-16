@@ -96,10 +96,10 @@ def run_research(
             state.research_iteration = iteration
             state.checkpoint(f"research_batch_{iteration}_complete")
 
-            # Summarize all new outputs
+            # Summarize all unsummarized outputs (including from prior runs)
             ui.step("Summarizing research outputs")
             if progress:
-                progress.update(3, "Summarizing", f"{len(results)} outputs")
+                progress.update(3, "Summarizing", "checking for unsummarized outputs")
             _summarize_outputs(state, results)
             state.checkpoint(f"summaries_{iteration}_complete")
 
@@ -540,33 +540,35 @@ CRITICAL: You MUST call Write tool with file_path="{output_file}" to save your r
 
 
 def _summarize_outputs(state: State, results: dict[str, AgentResult]):
-    """Summarize all successful research outputs in parallel.
+    """Summarize all unsummarized research outputs in parallel.
 
-    Reads content directly and passes to summarizer agents to avoid Read tool failures.
+    Scans disk for agent outputs missing summaries, not just the current batch.
+    This handles resumed runs where prior threads were completed but not summarized.
     """
     report_dir = Path(state.report_dir)
+    agents_dir = report_dir / "full" / "agents"
     summaries_dir = report_dir / "summaries" / "agents"
 
+    if not agents_dir.exists():
+        return
+
     tasks = []
-    for thread_id, result in results.items():
-        if not result.success:
+    for output_file in sorted(agents_dir.glob("*.md")):
+        thread_id = output_file.stem
+        summary_file = summaries_dir / f"{thread_id}_summary.md"
+
+        # Skip if already summarized
+        if summary_file.exists():
             continue
 
-        output_file = Path(result.output_file) if result.output_file else None
-        if not output_file or not output_file.exists():
-            continue
-
-        # Read content here and pass directly to summarizer
         try:
             content = output_file.read_text()
         except Exception as e:
             ui.warning(f"Failed to read {output_file}: {e}")
             continue
 
-        summary_file = summaries_dir / f"{thread_id}_summary.md"
-
-        # Use brief if available (detailed research instructions), otherwise topic
-        summary_topic = state.brief or state.topic
+        if not content.strip():
+            continue
 
         prompt = f"""TASK: Summarize research output.
 
