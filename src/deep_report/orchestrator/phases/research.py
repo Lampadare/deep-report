@@ -398,6 +398,13 @@ def _run_research_batch(
                                      log_dir=log_dir)
     ui.research_table_complete()
 
+    # Clean up mcp.json (contains API keys)
+    if mcp_config:
+        try:
+            mcp_config.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     # #14: Print failure summary
     failed_results = {tid: r for tid, r in results.items() if not r.success}
     if failed_results:
@@ -434,18 +441,25 @@ def _build_research_prompt(
     if use_mcp:
         search_section = """## Search Tools Available
 - **mcp__brave-search__brave_web_search**: General web search (use for most queries)
+- **mcp__brave-search__brave_news_search**: News search (use for recent events and current developments)
 - **mcp__exa__web_search_exa**: Semantic search (good for conceptual/academic queries)
-- **mcp__paper-search__search_arxiv** / **search_pubmed** / **search_biorxiv** / **search_google_scholar**: Academic paper databases
-- **mcp__paper-search__read_arxiv_paper** / **read_pubmed_paper** / **read_biorxiv_paper**: Read full paper text
+- **mcp__paper-search__search_arxiv**: Search arXiv papers
+- **mcp__paper-search__search_pubmed**: Search PubMed papers
+- **mcp__paper-search__search_biorxiv**: Search bioRxiv papers
+- **mcp__paper-search__search_google_scholar**: Search Google Scholar
+- **mcp__paper-search__read_arxiv_paper**: Read full arXiv paper text
+- **mcp__paper-search__read_pubmed_paper**: Read full PubMed paper text
+- **mcp__paper-search__read_biorxiv_paper**: Read full bioRxiv paper text
 - **mcp__firecrawl__firecrawl_scrape**: Fetch and read any web page
 - **mcp__crawl4ai__scrape**: Backup page fetcher with stealth browsing
 
 ## Search Strategy
 1. Start with mcp__brave-search__brave_web_search or mcp__exa__web_search_exa for broad queries
-2. Use mcp__paper-search__search_arxiv / search_pubmed for academic papers
-3. Use mcp__paper-search__read_arxiv_paper etc. to read full paper content
-4. Use mcp__firecrawl__firecrawl_scrape to fetch specific web pages
-5. If firecrawl fails, try mcp__crawl4ai__scrape as backup"""
+2. Use mcp__brave-search__brave_news_search for recent events or news-sensitive topics
+3. Use mcp__paper-search__search_arxiv / mcp__paper-search__search_pubmed for academic papers
+4. Use mcp__paper-search__read_arxiv_paper etc. to read full paper content
+5. Use mcp__firecrawl__firecrawl_scrape to fetch specific web pages
+6. If firecrawl fails, try mcp__crawl4ai__scrape as backup"""
     else:
         search_section = """## Search Tools
 Use WebSearch and WebFetch to find authoritative sources.

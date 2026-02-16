@@ -67,6 +67,9 @@ AGENT_TOOLS = {
 # Allowed model names
 ALLOWED_MODELS = ["sonnet", "opus", "haiku"]
 
+# Docker image for crawl4ai MCP server
+_CRAWL4AI_IMAGE = "uysalsadi/crawl4ai-mcp-server:latest"
+
 
 def _cmd_exists(name: str) -> bool:
     """Check if a command is available on PATH."""
@@ -118,7 +121,6 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
         pass
 
     # crawl4ai via docker — only if docker + image are available (skip if not pulled)
-    _CRAWL4AI_IMAGE = "uysalsadi/crawl4ai-mcp-server:latest"
     if _cmd_exists("docker"):
         try:
             r = subprocess.run(
