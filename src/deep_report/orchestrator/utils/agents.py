@@ -480,6 +480,26 @@ def spawn_agent(
     Returns:
         AgentResult with success status and output
     """
+    result = _spawn_agent_impl(
+        prompt, model, output_file, timeout_secs, cwd,
+        allowed_tools, stream_callback, log_file, mcp_config,
+    )
+    ui.add_cost(result.estimated_cost)
+    return result
+
+
+def _spawn_agent_impl(
+    prompt: str,
+    model: str = "sonnet",
+    output_file: Optional[Path] = None,
+    timeout_secs: int = DEFAULT_TIMEOUT,
+    cwd: Optional[Path] = None,
+    allowed_tools: Optional[list[str]] = None,
+    stream_callback: Optional[Callable] = None,
+    log_file: Optional[Path] = None,
+    mcp_config: Optional[Path] = None,
+) -> AgentResult:
+    """Internal implementation of spawn_agent."""
     start = time.time()
 
     # Don't spawn if shutdown is in progress

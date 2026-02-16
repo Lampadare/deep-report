@@ -325,7 +325,6 @@ def _run_research_batch(
         # Update table status and running cost
         status = "complete" if result.success else "failed"
         ui.research_table_update(task_id, status, result.duration_secs)
-        ui.update_session_cost(running_cost[0])
 
         # Mark next pending thread as running (thread-safe via UI method)
         ui.research_table_mark_next_running()

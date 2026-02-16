@@ -1364,6 +1364,9 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
     original_handler = signal.signal(signal.SIGINT, _handle_sigint)
 
     # Start persistent session footer (phase bar + elapsed + cost + verbose)
+    # Seed footer cost from persisted state (non-zero on resume)
+    if state.total_cost > 0:
+        ui.update_session_cost(state.total_cost)
     ui.start_session()
 
     # Enable verbose if requested

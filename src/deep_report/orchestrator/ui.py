@@ -344,7 +344,6 @@ class DeepReportUI:
             return
         if self._session_start_time is None:
             self._session_start_time = time.time()
-        self._session_cost = 0.0
         self._footer_live = Live(
             _SpinnerTable(self._build_session_display),
             console=self.console,
@@ -364,8 +363,15 @@ class DeepReportUI:
                 self._active_content = None
 
     def update_session_cost(self, cost: float):
-        """Update the running session cost displayed in the footer."""
+        """Set the running session cost displayed in the footer."""
         self._session_cost = cost
+
+    def add_cost(self, amount: float):
+        """Thread-safe: add to the running session cost."""
+        if amount <= 0:
+            return
+        with self._status_lock:
+            self._session_cost += amount
 
     def _build_session_display(self):
         """Compose active content + footer for the session Live."""
