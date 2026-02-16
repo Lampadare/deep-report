@@ -152,7 +152,7 @@ def run_research(
                     avg_cost = 0.50  # fallback estimate
                 estimated_additional = avg_cost * followup_count
                 decision["estimated_additional_cost"] = f"~${estimated_additional:.2f} ({followup_count} threads)"
-                ui.info(f"Estimated additional cost: ~${estimated_additional:.2f} for {followup_count} follow-up threads (running total: ${state.total_cost:.2f})")
+                ui.info(f"Estimated additional cost: ~${estimated_additional:.2f} for {followup_count} follow-up threads (running total: ${state.total_cost:.2f}, excludes third-party API costs)")
 
                 if not approval.iteration_gate(state, decision, iteration):
                     ui.info("User stopped iterations, proceeding to synthesis")
@@ -433,19 +433,19 @@ def _build_research_prompt(
 
     if use_mcp:
         search_section = """## Search Tools Available
-- **brave_web_search**: General web search (use for most queries)
-- **web_search_exa**: Semantic search (good for conceptual/academic queries)
-- **search_arxiv / search_pubmed / search_biorxiv / search_google_scholar**: Academic paper databases
-- **read_arxiv_paper / read_pubmed_paper / read_biorxiv_paper**: Read full paper text
-- **firecrawl_scrape**: Fetch and read any web page
-- **crawl4ai scrape**: Backup page fetcher with stealth browsing
+- **mcp__brave-search__brave_web_search**: General web search (use for most queries)
+- **mcp__exa__web_search_exa**: Semantic search (good for conceptual/academic queries)
+- **mcp__paper-search__search_arxiv** / **search_pubmed** / **search_biorxiv** / **search_google_scholar**: Academic paper databases
+- **mcp__paper-search__read_arxiv_paper** / **read_pubmed_paper** / **read_biorxiv_paper**: Read full paper text
+- **mcp__firecrawl__firecrawl_scrape**: Fetch and read any web page
+- **mcp__crawl4ai__scrape**: Backup page fetcher with stealth browsing
 
 ## Search Strategy
-1. Start with brave_web_search or web_search_exa for broad queries
-2. Use search_arxiv/search_pubmed for academic papers
-3. Use read_*_paper tools to read full paper content
-4. Use firecrawl_scrape to fetch specific web pages
-5. If firecrawl_scrape fails, try crawl4ai scrape as backup"""
+1. Start with mcp__brave-search__brave_web_search or mcp__exa__web_search_exa for broad queries
+2. Use mcp__paper-search__search_arxiv / search_pubmed for academic papers
+3. Use mcp__paper-search__read_arxiv_paper etc. to read full paper content
+4. Use mcp__firecrawl__firecrawl_scrape to fetch specific web pages
+5. If firecrawl fails, try mcp__crawl4ai__scrape as backup"""
     else:
         search_section = """## Search Tools
 Use WebSearch and WebFetch to find authoritative sources.

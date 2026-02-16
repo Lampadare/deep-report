@@ -6,6 +6,7 @@ Handles spawning Claude agents via CLI and collecting their outputs.
 
 import subprocess
 import json
+import sys
 import time
 import os
 import threading
@@ -49,25 +50,6 @@ AGENT_TOOLS = {
     ],
     "research_fallback": [
         "Read", "Glob", "Grep", "Write", "WebSearch", "WebFetch",
-    ],
-    "research_electronics": [
-        "Read", "Glob", "Grep", "Write",
-        "mcp__brave-search__brave_web_search",
-        "mcp__brave-search__brave_news_search",
-        "mcp__exa__web_search_exa",
-        "mcp__paper-search__search_arxiv",
-        "mcp__paper-search__search_pubmed",
-        "mcp__paper-search__search_biorxiv",
-        "mcp__paper-search__search_google_scholar",
-        "mcp__paper-search__read_arxiv_paper",
-        "mcp__paper-search__read_pubmed_paper",
-        "mcp__paper-search__read_biorxiv_paper",
-        "mcp__firecrawl__firecrawl_scrape",
-        "mcp__crawl4ai__scrape",
-        # DigiKey tools
-        "mcp__digikey__keyword_search",
-        "mcp__digikey__product_details",
-        "mcp__digikey__get_product_media",
     ],
     "seed_processing": [
         "Read", "Write",
@@ -116,13 +98,12 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
             "env": {"FIRECRAWL_API_KEY": os.environ["FIRECRAWL_API_KEY"]},
         }
 
-    # Exa uses HTTP transport with OAuth — no API key needed
-    # but only include if user has authenticated (check for cookie/token)
-    if os.environ.get("EXA_API_KEY"):
-        # API key mode
+    # Exa uses HTTP transport with API key passed as query parameter
+    exa_key = os.environ.get("EXA_API_KEY")
+    if exa_key:
         servers["exa"] = {
             "type": "http",
-            "url": "https://mcp.exa.ai/mcp",
+            "url": f"https://mcp.exa.ai/mcp?exaApiKey={exa_key}",
         }
 
     # paper-search: check if the python module is installed
@@ -130,18 +111,27 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
         import importlib.util
         if importlib.util.find_spec("paper_search_mcp"):
             servers["paper-search"] = {
-                "command": "python",
+                "command": sys.executable,
                 "args": ["-m", "paper_search_mcp.server"],
             }
     except (ImportError, ValueError):
         pass
 
-    # crawl4ai via docker — only if docker is available
+    # crawl4ai via docker — only if docker + image are available (skip if not pulled)
+    _CRAWL4AI_IMAGE = "uysalsadi/crawl4ai-mcp-server:latest"
     if _cmd_exists("docker"):
-        servers["crawl4ai"] = {
-            "command": "docker",
-            "args": ["run", "--rm", "-i", "uysalsadi/crawl4ai-mcp-server:latest"],
-        }
+        try:
+            r = subprocess.run(
+                ["docker", "image", "inspect", _CRAWL4AI_IMAGE],
+                capture_output=True, timeout=5,
+            )
+            if r.returncode == 0:
+                servers["crawl4ai"] = {
+                    "command": "docker",
+                    "args": ["run", "--rm", "-i", _CRAWL4AI_IMAGE],
+                }
+        except (subprocess.TimeoutExpired, OSError):
+            pass
 
     if os.environ.get("DIGIKEY_CLIENT_ID"):
         digikey_dir = Path.home() / ".local" / "share" / "digikey-mcp"
@@ -154,19 +144,25 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
                 ],
             }
 
-    # Require at least one web search provider
+    # Require at least one search provider (web or academic)
     has_search = any(
-        k in servers for k in ("brave-search", "exa", "firecrawl")
+        k in servers for k in ("brave-search", "exa", "firecrawl", "paper-search")
     )
     if not has_search:
+        if servers:
+            ui.verbose(f"MCP servers available ({list(servers)}) but no search provider — skipping MCP config")
         return None
 
     config = {"mcpServers": servers}
     state_dir = report_dir / "state"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    config_path = state_dir / "mcp.json"
-    config_path.write_text(json.dumps(config, indent=2))
-    return config_path
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        config_path = state_dir / "mcp.json"
+        config_path.write_text(json.dumps(config, indent=2))
+        return config_path
+    except OSError as e:
+        ui.warning(f"Failed to write MCP config: {e} — falling back to WebSearch/WebFetch")
+        return None
 
 
 def _extract_json(text: str) -> dict | None:

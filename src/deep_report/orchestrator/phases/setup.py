@@ -380,13 +380,17 @@ def _process_seeds_via_agent(state: State, seeds: list[str]) -> bool:
         research_instructions = state.brief or state.topic
 
         if seed.startswith("http"):
+            if mcp_config:
+                fetch_steps = "1. Use mcp__firecrawl__firecrawl_scrape to get the URL content (or mcp__crawl4ai__scrape as backup)"
+            else:
+                fetch_steps = "1. Use WebFetch to get the URL content"
             prompt = f"""TASK: Fetch URL and save content to file.
 
 URL: {seed}
 OUTPUT FILE: {output_file}
 
 STEPS:
-1. Use firecrawl_scrape (or crawl4ai scrape as backup, or WebFetch as last resort) to get the URL content
+{fetch_steps}
 2. Extract the main content (title, key text, data)
 3. Use Write tool to save to {output_file}
 
