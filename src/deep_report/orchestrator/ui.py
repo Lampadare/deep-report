@@ -342,6 +342,8 @@ class DeepReportUI:
         """Start persistent session Live display with footer bar."""
         if not RICH_AVAILABLE:
             return
+        if self._footer_live:
+            return
         if self._session_start_time is None:
             self._session_start_time = time.time()
         self._footer_live = Live(
@@ -364,7 +366,8 @@ class DeepReportUI:
 
     def update_session_cost(self, cost: float):
         """Set the running session cost displayed in the footer."""
-        self._session_cost = cost
+        with self._status_lock:
+            self._session_cost = cost
 
     def add_cost(self, amount: float):
         """Thread-safe: add to the running session cost."""
@@ -376,9 +379,10 @@ class DeepReportUI:
     def _build_session_display(self):
         """Compose active content + footer for the session Live."""
         renderables = []
-        if self._active_content:
+        active = self._active_content  # snapshot to avoid TOCTOU race
+        if active:
             try:
-                content = self._active_content()
+                content = active()
                 if content is not None:
                     renderables.append(content)
             except Exception:
@@ -697,7 +701,7 @@ class DeepReportUI:
         # Force refresh for immediate feedback
         if RICH_AVAILABLE and self._footer_live:
             try:
-                self._footer_live.update(_SpinnerTable(self._build_session_display))
+                self._footer_live.refresh()
             except Exception:
                 logging.debug("research_table_update failed", exc_info=True)
         elif RICH_AVAILABLE and self._research_live:

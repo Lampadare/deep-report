@@ -363,8 +363,10 @@ CRITICAL: You MUST call Write tool with file_path="{output_file}" to save the se
         ui.agent_progress_update(current, f"{task_id}: {status}")
 
     # Run in parallel
-    results = spawn_agents_parallel(tasks, max_workers=5, on_complete=on_complete)
-    ui.agent_progress_complete(f"Synthesized {len(clusters)} sections")
+    try:
+        results = spawn_agents_parallel(tasks, max_workers=5, on_complete=on_complete)
+    finally:
+        ui.agent_progress_complete(f"Synthesized {len(clusters)} sections")
 
     synthesis_results = []
     for cluster in clusters:
@@ -704,8 +706,10 @@ CRITICAL: You MUST call Write tool with file_path="{part_file}" to save.
         ui.agent_progress_update(current, f"{task_id}: {status}")
         ui.verbose(f"Audio {task_id}: {status}")
 
-    results = spawn_agents_parallel(tasks, max_workers=5, on_complete=on_complete)
-    ui.agent_progress_complete(f"Converted {len(tasks)} sections to audio")
+    try:
+        results = spawn_agents_parallel(tasks, max_workers=5, on_complete=on_complete)
+    finally:
+        ui.agent_progress_complete(f"Converted {len(tasks)} sections to audio")
 
     # Combine parts in order
     audio_parts = []

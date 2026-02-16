@@ -23,7 +23,7 @@ def check_claude_auth():
     try:
         result = subprocess.run(
             ["claude", "--print", "--model", "haiku", "say ok"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
             from .orchestrator.ui import ui

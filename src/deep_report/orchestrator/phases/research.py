@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """Phase 3: Research - Iterative research with decision agent evaluation."""
 
-import json
 import threading
 from pathlib import Path
 from typing import Optional
 
 from ..state import State
 from ..utils import (
-    spawn_agent,
     spawn_agents_parallel,
     spawn_decision_agent,
     generate_mcp_config,
@@ -100,7 +98,7 @@ def run_research(
             ui.step("Summarizing research outputs")
             if progress:
                 progress.update(3, "Summarizing", "checking for unsummarized outputs")
-            _summarize_outputs(state, results)
+            _summarize_outputs(state)
             state.checkpoint(f"summaries_{iteration}_complete")
 
         # Decision agent: should we go deeper?
@@ -284,7 +282,6 @@ def _run_research_batch(
 
     # Progress callback with thread-safe counter and incremental state saves
     completed = [0]
-    running_cost = [state.total_cost]  # Resume from prior iterations' accumulated cost
     total = len(tasks)
     state_lock = threading.Lock()
 
@@ -294,8 +291,8 @@ def _run_research_batch(
             completed[0] += 1
             current = completed[0]
 
-            running_cost[0] += result.estimated_cost
-            state.total_cost = running_cost[0]
+            # Sync from authoritative source (ui tracks all agents, all retries)
+            state.total_cost = ui._session_cost
 
             if result.success:
                 if task_id not in state.completed_threads:
@@ -538,11 +535,12 @@ CRITICAL: You MUST call Write tool with file_path="{output_file}" to save your r
 """
 
 
-def _summarize_outputs(state: State, results: dict[str, AgentResult]):
+def _summarize_outputs(state: State):
     """Summarize all unsummarized research outputs in parallel.
 
     Scans disk for agent outputs missing summaries, not just the current batch.
     This handles resumed runs where prior threads were completed but not summarized.
+    Only summarizes outputs from successfully completed agents.
     """
     report_dir = Path(state.report_dir)
     agents_dir = report_dir / "full" / "agents"
@@ -555,6 +553,10 @@ def _summarize_outputs(state: State, results: dict[str, AgentResult]):
     for output_file in sorted(agents_dir.glob("*.md")):
         thread_id = output_file.stem
         summary_file = summaries_dir / f"{thread_id}_summary.md"
+
+        # Skip partial outputs from failed/timed-out agents
+        if thread_id not in state.completed_threads:
+            continue
 
         # Skip if already summarized
         if summary_file.exists():

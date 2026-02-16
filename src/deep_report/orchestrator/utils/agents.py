@@ -810,7 +810,7 @@ def spawn_agents_parallel(
     def _on_done(future, task_id):
         try:
             result = future.result()
-        except Exception as e:
+        except BaseException as e:
             result = AgentResult(success=False, output="", error=str(e))
 
         # Update circuit breaker
@@ -882,7 +882,10 @@ def spawn_agents_parallel(
 
         # Wait for all submitted tasks to finish
         for future in futures:
-            future.result(timeout=None)  # blocks until done; callback already fired
+            try:
+                future.result(timeout=None)
+            except BaseException:
+                pass  # _on_done callback already collected the result
 
     return results
 

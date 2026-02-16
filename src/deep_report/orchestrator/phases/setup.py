@@ -462,15 +462,16 @@ CRITICAL: You MUST call the Write tool with file_path="{output_file}" at the end
         status = "✓" if result.success else "✗"
         ui.agent_progress_update(completed[0], f"{task_id}: {status}")
 
-    results = spawn_agents_parallel(tasks, max_workers=5, on_complete=on_complete)
-    ui.agent_progress_complete(f"Processed {len(tasks)} seeds")
-
-    # Clean up mcp.json (contains API keys)
-    if mcp_config:
-        try:
-            mcp_config.unlink(missing_ok=True)
-        except OSError:
-            pass
+    try:
+        results = spawn_agents_parallel(tasks, max_workers=5, on_complete=on_complete)
+    finally:
+        ui.agent_progress_complete(f"Processed {len(tasks)} seeds")
+        # Clean up mcp.json (contains API keys)
+        if mcp_config:
+            try:
+                mcp_config.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     failed = [tid for tid, r in results.items() if not r.success]
     if failed:

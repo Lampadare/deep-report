@@ -1086,13 +1086,14 @@ def setup_skill() -> int:
 
 def show_intro() -> int:
     """Show onboarding guide with flow explanation and examples."""
-    if not RICH_AVAILABLE:
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.markdown import Markdown
+    except ImportError:
         print("Install 'rich' for the best onboarding experience.")
         print("Run: pip install rich")
         return 0
-
-    from rich.panel import Panel
-    from rich.markdown import Markdown
 
     console = Console()
 
@@ -1319,7 +1320,7 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
         ui.set_verbose(enabled)
 
     verbose_toggle = VerboseToggle(on_toggle=on_verbose_toggle)
-    toggle_available = verbose_toggle.start()
+    verbose_toggle.start()
 
     phases = [
         (1, "Setup", lambda s: True),  # Already done if start_phase > 1
@@ -1351,9 +1352,9 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
             return
 
         # Second press within 3s — graceful shutdown
+        # Set flag only; avoid calling Live.stop() from signal handler
+        # (Rich holds a threading lock that can deadlock if signal fires mid-render)
         _shutting_down[0] = True
-        ui.ensure_live_stopped()
-        ui.warning("Shutting down gracefully...")
         try:
             state.save()
         except Exception:
