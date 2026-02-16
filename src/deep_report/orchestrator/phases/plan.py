@@ -57,9 +57,10 @@ def run_plan(state: State) -> bool:
         from rich.panel import Panel
 
         tree = Tree(f"[bold]📋 Research Plan[/] — {len(state.threads)} threads", guide_style="blue")
-        for i, thread in enumerate(state.threads, 1):
-            title = thread.get("title", thread.get("id", f"Thread {i}"))
-            branch = tree.add(f"[bold cyan]{i}. {title}[/]")
+        for thread in state.threads:
+            tid = thread.get("id", "?")
+            title = thread.get("title", tid)
+            branch = tree.add(f"[bold cyan]{tid}. {title}[/]")
             objective = thread.get("objective", "")
             if objective:
                 branch.add(f"[dim]{objective}[/]")

@@ -11,7 +11,7 @@ import time
 import os
 import threading
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Callable, TYPE_CHECKING
 from dataclasses import dataclass
 
@@ -784,8 +784,34 @@ def spawn_agents_parallel(
     # Use default circuit breaker if none provided
     cb = circuit_breaker or CircuitBreaker(failure_threshold=3, reset_timeout=60.0)
 
+    # Process completions immediately via done callbacks (not after all submissions)
+    results_lock = threading.Lock()
+
+    def _on_done(future, task_id):
+        try:
+            result = future.result()
+        except Exception as e:
+            result = AgentResult(success=False, output="", error=str(e))
+
+        # Update circuit breaker
+        if result.success:
+            cb.record_success()
+        else:
+            is_open = cb.record_failure()
+            if is_open:
+                ui.verbose(f"Circuit breaker opened after {cb.failure_threshold} consecutive failures")
+
+        with results_lock:
+            results[task_id] = result
+
+        if on_complete:
+            try:
+                on_complete(task_id, result)
+            except Exception as e:
+                ui.warning(f"on_complete callback failed for {task_id}: {e}")
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {}
+        futures = []
 
         for i, task in enumerate(tasks):
             if process_tracker.is_shutting_down:
@@ -809,6 +835,8 @@ def spawn_agents_parallel(
             if log_dir:
                 task_log_file = log_dir / f"{task.get('id', f'task_{i}')}.jsonl"
 
+            task_id = task.get("id", "")
+
             # Use retry wrapper for reliability
             try:
                 future = pool.submit(
@@ -820,7 +848,7 @@ def spawn_agents_parallel(
                     cwd=Path(task["cwd"]) if task.get("cwd") else None,
                     max_retries=task.get("max_retries", 3),
                     allowed_tools=task.get("allowed_tools"),
-                    task_label=task.get("id", ""),
+                    task_label=task_id,
                     intervention_handler=intervention_handler,
                     stream_callback=task_stream_cb,
                     log_file=task_log_file,
@@ -829,30 +857,12 @@ def spawn_agents_parallel(
             except RuntimeError:
                 # Pool is shutting down
                 break
-            futures[future] = task["id"]
+            future.add_done_callback(lambda f, tid=task_id: _on_done(f, tid))
+            futures.append(future)
 
-        for future in as_completed(futures):
-            task_id = futures[future]
-            try:
-                result = future.result()
-            except Exception as e:
-                result = AgentResult(success=False, output="", error=str(e))
-
-            # Update circuit breaker
-            if result.success:
-                cb.record_success()
-            else:
-                is_open = cb.record_failure()
-                if is_open:
-                    ui.verbose(f"Circuit breaker opened after {cb.failure_threshold} consecutive failures")
-
-            results[task_id] = result
-
-            if on_complete:
-                try:
-                    on_complete(task_id, result)
-                except Exception as e:
-                    ui.warning(f"on_complete callback failed for {task_id}: {e}")
+        # Wait for all submitted tasks to finish
+        for future in futures:
+            future.result(timeout=None)  # blocks until done; callback already fired
 
     return results
 

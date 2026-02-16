@@ -909,9 +909,6 @@ def run_new_report(config: dict, ctx: OrchestratorContext) -> int:
     # Initialize state (will be saved after setup)
     state = State()
 
-    # Phase bar: initial state
-    ui.phase_bar(0)
-
     # Phase 1: Setup
     ui.phase_start(1, "Setup")
     if not run_setup(state, config):
@@ -926,7 +923,6 @@ def run_new_report(config: dict, ctx: OrchestratorContext) -> int:
 
     # Transition message
     ui.info("Setup complete — decomposing into research threads...")
-    ui.phase_bar(1)
 
     # Continue with remaining phases
     result = continue_from_phase(state, 2, ctx)
@@ -1318,13 +1314,9 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
         state.save()
 
     # Set up verbose toggle (press 'v' during execution)
+    # Footer shows verbose indicator, so just toggle the flag
     def on_verbose_toggle(enabled: bool):
         ui.set_verbose(enabled)
-        print()  # blank line separator
-        if enabled:
-            ui.dim("  verbose output ON — press 'v' again to hide")
-        else:
-            ui.dim("  verbose output OFF")
 
     verbose_toggle = VerboseToggle(on_toggle=on_verbose_toggle)
     toggle_available = verbose_toggle.start()
@@ -1371,10 +1363,10 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
 
     original_handler = signal.signal(signal.SIGINT, _handle_sigint)
 
-    # Show initial phase bar
-    ui.phase_bar(start_phase - 1)
+    # Start persistent session footer (phase bar + elapsed + cost + verbose)
+    ui.start_session()
 
-    # Enable verbose if requested (no hint — the research table footer shows 'v' = verbose)
+    # Enable verbose if requested
     if ctx.verbose:
         ui.set_verbose(True)
 
@@ -1419,8 +1411,7 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
                 elif phase_num == 4:
                     ui.info("Report assembled — running final cleanup...")
 
-                # Update phase bar after completion
-                ui.phase_bar(phase_num)
+                # Phase bar updates automatically via session footer
 
             except KeyboardInterrupt:
                 ui.warning(f"Interrupted during phase {phase_num}")
@@ -1441,6 +1432,7 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
                 print()
                 return 1
     finally:
+        ui.stop_session()
         signal.signal(signal.SIGINT, original_handler)
         verbose_toggle.stop()
 

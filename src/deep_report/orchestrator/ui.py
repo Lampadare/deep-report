@@ -120,6 +120,10 @@ class DeepReportUI:
         self._log_buffer = deque(maxlen=50)
         # Current phase (for Live footer bar)
         self._current_phase = 0
+        # Session (persistent footer) state
+        self._footer_live = None
+        self._active_content = None  # callable returning a Renderable, or None
+        self._session_cost = 0.0
 
     def set_verbose(self, enabled: bool):
         """Enable or disable verbose mode."""
@@ -139,10 +143,6 @@ class DeepReportUI:
         if not self._verbose:
             return
         if RICH_AVAILABLE:
-            # When Live is active, the log buffer is rendered as part of the
-            # Live display — no need to console.print (would go above Live).
-            if self._research_live and getattr(self._research_live, 'is_started', False):
-                return
             self.console.print(f"[{theme.dim}]{message}[/]")
         else:
             print(f"  [V] {message}")
@@ -151,22 +151,16 @@ class DeepReportUI:
         """Replay buffered log entries when verbose is toggled on."""
         if not self._log_buffer:
             return
-        # When Live is active, buffer is rendered as part of the Live display
-        if self._research_live and getattr(self._research_live, 'is_started', False):
-            return
         if RICH_AVAILABLE:
-            console = self.console
-            if self._research_live and getattr(self._research_live, 'is_started', False):
-                console = self._research_live.console
-            console.print(f"[{theme.dim}]── recent log ({len(self._log_buffer)} entries) ──[/]")
+            self.console.print(f"[{theme.dim}]── recent log ({len(self._log_buffer)} entries) ──[/]")
             for level, msg in self._log_buffer:
                 if level == "warning":
-                    console.print(f"[{theme.dim}]⚠ {msg}[/]")
+                    self.console.print(f"[{theme.dim}]⚠ {msg}[/]")
                 elif level == "error":
-                    console.print(f"[{theme.dim}]✗ {msg}[/]")
+                    self.console.print(f"[{theme.dim}]✗ {msg}[/]")
                 else:
-                    console.print(f"[{theme.dim}]  {msg}[/]")
-            console.print(f"[{theme.dim}]── end log ──[/]")
+                    self.console.print(f"[{theme.dim}]  {msg}[/]")
+            self.console.print(f"[{theme.dim}]── end log ──[/]")
         else:
             print(f"  --- recent log ({len(self._log_buffer)} entries) ---")
             for level, msg in self._log_buffer:
@@ -279,7 +273,7 @@ class DeepReportUI:
         if RICH_AVAILABLE:
             color = theme.phase_colors[(phase - 1) % len(theme.phase_colors)]
             self.console.print()
-            self.console.print(f"[bold {color}]{'━' * 3} {icon} PHASE {phase}: {name.upper()} {'━' * 3}[/]")
+            self.console.print(Rule(f"[bold {color}]{icon} PHASE {phase}: {name.upper()}[/]", style=color))
         else:
             print()
             print(f"=== {icon} PHASE {phase}: {name.upper()} ===")
@@ -301,6 +295,9 @@ class DeepReportUI:
 
     def phase_bar(self, completed_phase: int, total: int = 5):
         """Show persistent phase progress bar."""
+        if self._footer_live:
+            return  # Footer already shows phase bar
+
         PHASE_NAMES = ["Setup", "Planning", "Research", "Synthesis", "Cleanup"]
 
         if RICH_AVAILABLE:
@@ -340,6 +337,70 @@ class DeepReportUI:
             else:
                 text.append(f"○ {name}", theme.dim)
         return text
+
+    def start_session(self):
+        """Start persistent session Live display with footer bar."""
+        if not RICH_AVAILABLE:
+            return
+        if self._session_start_time is None:
+            self._session_start_time = time.time()
+        self._session_cost = 0.0
+        self._footer_live = Live(
+            _SpinnerTable(self._build_session_display),
+            console=self.console,
+            refresh_per_second=4,
+        )
+        self._footer_live.start()
+
+    def stop_session(self):
+        """Stop the persistent session Live display."""
+        if self._footer_live:
+            try:
+                self._footer_live.stop()
+            except Exception:
+                pass
+            finally:
+                self._footer_live = None
+                self._active_content = None
+
+    def update_session_cost(self, cost: float):
+        """Update the running session cost displayed in the footer."""
+        self._session_cost = cost
+
+    def _build_session_display(self):
+        """Compose active content + footer for the session Live."""
+        renderables = []
+        if self._active_content:
+            try:
+                content = self._active_content()
+                if content is not None:
+                    renderables.append(content)
+            except Exception:
+                pass
+        renderables.append(self._build_footer())
+        return Group(*renderables)
+
+    def _build_footer(self):
+        """Build footer with phase bar, elapsed, cost, verbose."""
+        parts = [Rule(style=theme.dim)]
+        parts.append(self._render_phase_bar_text())
+
+        # Stats line
+        stats = Text()
+        if self._session_start_time:
+            elapsed = time.time() - self._session_start_time
+            stats.append(f"  {format_duration(elapsed)}", theme.dim)
+        if self._session_cost > 0:
+            if len(stats) > 0:
+                stats.append("  ", theme.dim)
+            stats.append(f"${self._session_cost:.2f}", theme.dim)
+        if self._verbose:
+            stats.append("  verbose ON", f"bold {theme.accent}")
+        else:
+            stats.append("  'v' = verbose", theme.dim)
+        parts.append(stats)
+
+        return Group(*parts)
 
     def step(self, message: str):
         """Print a step message."""
@@ -424,7 +485,14 @@ class DeepReportUI:
     @contextmanager
     def show_loading(self, message: str):
         """Show animated spinner during loading."""
-        if RICH_AVAILABLE:
+        if RICH_AVAILABLE and self._footer_live:
+            spinner = Spinner("dots", text=f"[{theme.accent}]{message}[/]")
+            self._active_content = lambda: spinner
+            try:
+                yield
+            finally:
+                self._active_content = None
+        elif RICH_AVAILABLE:
             spinner = Spinner("dots", text=f"[{theme.accent}]{message}[/]")
             with Live(spinner, console=self.console, refresh_per_second=10, transient=True):
                 yield
@@ -445,9 +513,12 @@ class DeepReportUI:
                     console=self.console,
                     transient=False,
                 )
-                self._live = Live(self._progress, console=self.console, refresh_per_second=4)
-                self._live.start()
                 self._task_id = self._progress.add_task(description, total=total, status="starting...")
+                if self._footer_live:
+                    self._active_content = lambda: self._progress
+                else:
+                    self._live = Live(self._progress, console=self.console, refresh_per_second=4)
+                    self._live.start()
             except Exception:
                 print(f"{description} (0/{total})...")
                 self._plain_total = total
@@ -468,7 +539,12 @@ class DeepReportUI:
 
     def agent_progress_complete(self, message: str = "Complete"):
         """Complete agent progress tracking. Safe to call multiple times."""
-        if RICH_AVAILABLE and self._live:
+        if self._footer_live and self._progress:
+            self._active_content = None
+            self._progress = None
+            self._task_id = None
+            self.success(message)
+        elif RICH_AVAILABLE and self._live:
             try:
                 self._live.stop()
             except Exception:
@@ -482,7 +558,14 @@ class DeepReportUI:
     @contextmanager
     def spinner_task(self, message: str):
         """Show spinner during a single long task."""
-        if RICH_AVAILABLE:
+        if RICH_AVAILABLE and self._footer_live:
+            spinner = Spinner("dots", text=f"[{theme.accent}]{message}[/]")
+            self._active_content = lambda: spinner
+            try:
+                yield
+            finally:
+                self._active_content = None
+        elif RICH_AVAILABLE:
             with self.console.status(f"[{theme.accent}]{message}[/]", spinner="dots"):
                 yield
         else:
@@ -506,30 +589,49 @@ class DeepReportUI:
             print(f"\n{title}")
             return
 
-        try:
-            self._research_live = Live(
-                _SpinnerTable(self._build_research_table),
-                console=self.console,
-                refresh_per_second=4
-            )
-            self._research_live.start()
-        except Exception:
-            print(f"\n{title}")
+        if self._footer_live:
+            self._active_content = self._build_research_table
+        else:
+            try:
+                self._research_live = Live(
+                    _SpinnerTable(self._build_research_table),
+                    console=self.console,
+                    refresh_per_second=4
+                )
+                self._research_live.start()
+            except Exception:
+                print(f"\n{title}")
 
     def _build_research_table(self):
-        """Build the research status table."""
+        """Build the research status table (width-adaptive)."""
+        width = self.console.width if self.console else 100
+
         with self._status_lock:
             table = Table(show_header=True, box=ROUNDED)
-            table.add_column("#", width=4, justify="right")
-            table.add_column("Agent", min_width=30, max_width=55, no_wrap=True)
-            table.add_column("Status", width=20)
+
+            # Width-adaptive columns
+            if width < 90:
+                table.add_column("ID", width=14, no_wrap=True)
+                table.add_column("Agent", min_width=20, max_width=35, no_wrap=True)
+                table.add_column("Status", width=16)
+                title_max = 32
+            elif width < 130:
+                table.add_column("ID", width=22, no_wrap=True)
+                table.add_column("Agent", min_width=30, max_width=55, no_wrap=True)
+                table.add_column("Status", width=20)
+                title_max = 50
+            else:
+                table.add_column("ID", width=22, no_wrap=True)
+                table.add_column("Agent", min_width=40, max_width=70, no_wrap=True)
+                table.add_column("Status", width=22)
+                title_max = 65
 
             char = SPINNER_CHARS[self._spinner_frame % len(SPINNER_CHARS)]
             self._spinner_frame += 1
 
-            for i, thread in enumerate(self._threads, 1):
+            for thread in self._threads:
                 tid = thread["id"]
-                title = self._truncate(thread.get("title", tid), 50)
+                title = self._truncate(thread.get("title", tid), title_max)
                 status = self._thread_status.get(tid, "pending")
 
                 if status == "pending":
@@ -546,7 +648,7 @@ class DeepReportUI:
                 else:
                     status_text = f"[{theme.dim}]{status}[/]"
 
-                table.add_row(str(i), title, status_text)
+                table.add_row(tid, title, status_text)
 
             complete = sum(1 for s in self._thread_status.values() if s == "complete")
             failed = sum(1 for s in self._thread_status.values() if s == "failed")
@@ -555,18 +657,10 @@ class DeepReportUI:
             pct = int(complete / total * 100) if total else 0
             durations_snapshot = list(self._agent_durations)
             research_title = self._research_title
-            research_start = self._research_start_time
-            table_cost = self._table_cost
 
-        # Elapsed time
-        parts = []
-        if research_start is not None:
-            elapsed_secs = time.monotonic() - research_start
-            parts.append(f"Elapsed: {format_duration(elapsed_secs)}")
+        # Subtitle: progress + ETA + failed (elapsed/cost/verbose moved to footer)
+        parts = [f"Progress: {complete}/{total} ({pct}%)"]
 
-        parts.append(f"Progress: {complete}/{total} ({pct}%)")
-
-        # ETA from rolling average (only after 3+ agents complete)
         if len(durations_snapshot) >= 3 and complete < total:
             avg = sum(durations_snapshot) / len(durations_snapshot)
             remaining = total - complete - failed
@@ -577,30 +671,13 @@ class DeepReportUI:
         if failed:
             parts.append(f"[{theme.error}]✗ {failed} failed[/]")
 
-        if table_cost is not None:
-            parts.append(f"Cost: ${table_cost:.2f}")
-
-        parts.append(f"[{theme.dim}]'v' = verbose | Ctrl+C x2 = quit[/]")
+        if not self._footer_live:
+            parts.append(f"[{theme.dim}]'v' = verbose | Ctrl+C x2 = quit[/]")
 
         summary = " | ".join(parts)
 
-        panel = Panel(table, title=f"[bold]🔬 {research_title}[/]",
-                      subtitle=summary, border_style=theme.border)
-
-        renderables = [panel]
-
-        # Verbose log tail (last 8 entries shown in the Live area)
-        if self._verbose and self._log_buffer:
-            recent = list(self._log_buffer)[-8:]
-            for level, msg in recent:
-                prefix = "⚠ " if level == "warning" else "✗ " if level == "error" else "  "
-                renderables.append(Text(f"{prefix}{msg}", style=theme.dim))
-
-        # Footer: separator + phase bar
-        renderables.append(Rule(style=theme.dim))
-        renderables.append(self._render_phase_bar_text())
-
-        return Group(*renderables)
+        return Panel(table, title=f"[bold]🔬 {research_title}[/]",
+                     subtitle=summary, border_style=theme.border)
 
     def research_table_update(self, thread_id: str, status: str, duration: float = 0):
         """Update a thread's status."""
@@ -611,8 +688,13 @@ class DeepReportUI:
             if status == "complete" and duration is not None:
                 self._agent_durations.append(duration)
 
-        # Live auto-refreshes via _SpinnerTable, but force an update for immediate feedback
-        if RICH_AVAILABLE and self._research_live:
+        # Force refresh for immediate feedback
+        if RICH_AVAILABLE and self._footer_live:
+            try:
+                self._footer_live.update(_SpinnerTable(self._build_session_display))
+            except Exception:
+                logging.debug("research_table_update failed", exc_info=True)
+        elif RICH_AVAILABLE and self._research_live:
             try:
                 self._research_live.update(_SpinnerTable(self._build_research_table))
             except Exception:
@@ -650,7 +732,10 @@ class DeepReportUI:
 
     def research_table_complete(self):
         """Finalize and close the live table. Safe to call multiple times."""
-        if RICH_AVAILABLE and self._research_live:
+        if self._footer_live:
+            # Clear active content; session Live keeps running
+            self._active_content = None
+        elif RICH_AVAILABLE and self._research_live:
             try:
                 self._research_live.stop()
             except Exception:
@@ -658,11 +743,12 @@ class DeepReportUI:
             finally:
                 self._research_live = None
 
-            with self._status_lock:
-                complete = sum(1 for s in self._thread_status.values() if s == "complete")
-                failed = sum(1 for s in self._thread_status.values() if s == "failed")
-                total = len(self._thread_status)
+        with self._status_lock:
+            complete = sum(1 for s in self._thread_status.values() if s == "complete")
+            failed = sum(1 for s in self._thread_status.values() if s == "failed")
+            total = len(self._thread_status)
 
+        if total > 0:
             if failed:
                 self.warning(f"Research: {complete}/{total} succeeded, {failed} failed")
             else:
@@ -672,6 +758,14 @@ class DeepReportUI:
 
     def ensure_live_stopped(self):
         """Stop all live displays if running. Call from exception handlers."""
+        if self._footer_live:
+            try:
+                self._footer_live.stop()
+            except Exception:
+                pass
+            finally:
+                self._footer_live = None
+                self._active_content = None
         if self._live:
             try:
                 self._live.stop()
@@ -708,17 +802,34 @@ class DeepReportUI:
             print(f"  {reasoning}")
 
     def plan_summary(self, threads: list[dict]):
-        """Display research plan threads in a table."""
+        """Display research plan threads in a table (width-adaptive)."""
         if RICH_AVAILABLE:
+            width = self.console.width if self.console else 100
             table = Table(show_header=True, box=ROUNDED)
-            table.add_column("#", width=4, justify="right", style=theme.dim)
-            table.add_column("Title", width=30)
-            table.add_column("Objective", width=44)
 
-            for i, thread in enumerate(threads, 1):
-                title = self._truncate(thread.get("title", thread.get("id", "")), 28)
-                objective = self._truncate(thread.get("objective", ""), 42)
-                table.add_row(str(i), title, objective)
+            if width < 90:
+                table.add_column("ID", width=14, style=theme.dim)
+                table.add_column("Title", width=24)
+                title_max, obj_max = 22, 0
+            elif width < 130:
+                table.add_column("ID", width=22, style=theme.dim)
+                table.add_column("Title", width=30)
+                table.add_column("Objective", width=44)
+                title_max, obj_max = 28, 42
+            else:
+                table.add_column("ID", width=22, style=theme.dim)
+                table.add_column("Title", width=40)
+                table.add_column("Objective", width=60)
+                title_max, obj_max = 38, 58
+
+            for thread in threads:
+                tid = thread.get("id", "?")
+                title = self._truncate(thread.get("title", tid), title_max)
+                if obj_max > 0:
+                    objective = self._truncate(thread.get("objective", ""), obj_max)
+                    table.add_row(tid, title, objective)
+                else:
+                    table.add_row(tid, title)
 
             self.console.print()
             self.console.print(Panel(
@@ -728,10 +839,11 @@ class DeepReportUI:
             ))
         else:
             print("\n=== RESEARCH PLAN ===")
-            for i, thread in enumerate(threads, 1):
-                title = self._truncate(thread.get("title", thread.get("id", "")), 40)
+            for thread in threads:
+                tid = thread.get("id", "?")
+                title = self._truncate(thread.get("title", tid), 40)
                 objective = self._truncate(thread.get("objective", ""), 50)
-                print(f"  {i:2d}. {title}")
+                print(f"  {tid}. {title}")
                 print(f"      {objective}")
             print()
 

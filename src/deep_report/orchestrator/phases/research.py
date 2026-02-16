@@ -325,7 +325,7 @@ def _run_research_batch(
         # Update table status and running cost
         status = "complete" if result.success else "failed"
         ui.research_table_update(task_id, status, result.duration_secs)
-        ui.research_table_update_cost(running_cost[0])
+        ui.update_session_cost(running_cost[0])
 
         # Mark next pending thread as running (thread-safe via UI method)
         ui.research_table_mark_next_running()
@@ -348,7 +348,7 @@ def _run_research_batch(
     def make_stream_cb(thread_id: str):
         def cb(event_type: str, name: str, data: dict):
             if event_type == "tool_use":
-                # Log tool calls with thread context
+                # Log tool calls with thread ID for cross-reference with table
                 if name == "WebSearch":
                     query = data.get("query", "")[:80]
                     ui.verbose(f"[{thread_id}] WebSearch: {query}")
