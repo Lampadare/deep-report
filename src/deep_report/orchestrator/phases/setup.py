@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Optional
 
 from ..state import State
-from ..utils import spawn_agent, AGENT_TOOLS
+from ..utils import spawn_agent, generate_mcp_config, AGENT_TOOLS
 from ..ui import ui
 
 # Extensions we accept as seed references
@@ -356,6 +356,14 @@ def _process_seeds_via_agent(state: State, seeds: list[str]) -> bool:
     from ..utils import spawn_agents_parallel
 
     report_dir = Path(state.report_dir)
+
+    # Generate MCP config; select tool preset for URL seeds accordingly
+    mcp_config = generate_mcp_config(report_dir)
+    if mcp_config:
+        url_tools = AGENT_TOOLS["seed_processing"]
+    else:
+        url_tools = AGENT_TOOLS["seed_processing_fallback"]
+
     tasks = []
 
     for i, seed in enumerate(seeds):
@@ -378,7 +386,7 @@ URL: {seed}
 OUTPUT FILE: {output_file}
 
 STEPS:
-1. Use WebFetch to get the URL content
+1. Use firecrawl_scrape (or crawl4ai scrape as backup, or WebFetch as last resort) to get the URL content
 2. Extract the main content (title, key text, data)
 3. Use Write tool to save to {output_file}
 
@@ -420,13 +428,20 @@ STEPS:
 CRITICAL: You MUST call the Write tool with file_path="{output_file}" at the end.
 """
 
+        # URL seeds need fetch tools; file seeds only need Read/Write
+        if seed.startswith("http"):
+            seed_tools = url_tools
+        else:
+            seed_tools = ["Read", "Write"]
+
         tasks.append({
             "id": f"seed_{i+1}",
             "prompt": prompt,
             "model": "sonnet",
             "output_file": str(output_file),
             "timeout_secs": 900,
-            "allowed_tools": ["Read", "WebSearch", "WebFetch", "Write"],
+            "allowed_tools": seed_tools,
+            "mcp_config": str(mcp_config) if mcp_config and seed.startswith("http") else None,
         })
 
     if not tasks:

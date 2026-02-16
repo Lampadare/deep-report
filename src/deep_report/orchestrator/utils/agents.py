@@ -29,7 +29,54 @@ PLANNING_TIMEOUT = 1620  # 27 minutes
 
 # Tool access presets for different agent roles
 AGENT_TOOLS = {
-    "research": ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "Write"],
+    "research": [
+        "Read", "Glob", "Grep", "Write",
+        # Web search
+        "mcp__brave-search__brave_web_search",
+        "mcp__brave-search__brave_news_search",
+        "mcp__exa__web_search_exa",
+        # Academic papers
+        "mcp__paper-search__search_arxiv",
+        "mcp__paper-search__search_pubmed",
+        "mcp__paper-search__search_biorxiv",
+        "mcp__paper-search__search_google_scholar",
+        "mcp__paper-search__read_arxiv_paper",
+        "mcp__paper-search__read_pubmed_paper",
+        "mcp__paper-search__read_biorxiv_paper",
+        # Page fetching
+        "mcp__firecrawl__firecrawl_scrape",
+        "mcp__crawl4ai__scrape",
+    ],
+    "research_fallback": [
+        "Read", "Glob", "Grep", "Write", "WebSearch", "WebFetch",
+    ],
+    "research_electronics": [
+        "Read", "Glob", "Grep", "Write",
+        "mcp__brave-search__brave_web_search",
+        "mcp__brave-search__brave_news_search",
+        "mcp__exa__web_search_exa",
+        "mcp__paper-search__search_arxiv",
+        "mcp__paper-search__search_pubmed",
+        "mcp__paper-search__search_biorxiv",
+        "mcp__paper-search__search_google_scholar",
+        "mcp__paper-search__read_arxiv_paper",
+        "mcp__paper-search__read_pubmed_paper",
+        "mcp__paper-search__read_biorxiv_paper",
+        "mcp__firecrawl__firecrawl_scrape",
+        "mcp__crawl4ai__scrape",
+        # DigiKey tools
+        "mcp__digikey__keyword_search",
+        "mcp__digikey__product_details",
+        "mcp__digikey__get_product_media",
+    ],
+    "seed_processing": [
+        "Read", "Write",
+        "mcp__firecrawl__firecrawl_scrape",
+        "mcp__crawl4ai__scrape",
+    ],
+    "seed_processing_fallback": [
+        "Read", "Write", "WebSearch", "WebFetch",
+    ],
     "summarizer": ["Read", "Write"],
     "synthesis": ["Read", "Glob", "Write"],
     "decision": ["Read"],  # Read-only, output via stdout
@@ -37,6 +84,89 @@ AGENT_TOOLS = {
 
 # Allowed model names
 ALLOWED_MODELS = ["sonnet", "opus", "haiku"]
+
+
+def _cmd_exists(name: str) -> bool:
+    """Check if a command is available on PATH."""
+    import shutil
+    return shutil.which(name) is not None
+
+
+def generate_mcp_config(report_dir: Path) -> Optional[Path]:
+    """Generate MCP config for agents based on available API keys and tools.
+
+    Only includes servers whose dependencies are present (API keys, binaries).
+    Returns path to config file, or None if no search providers available.
+    """
+    servers = {}
+
+    has_npx = _cmd_exists("npx")
+
+    if os.environ.get("BRAVE_API_KEY") and has_npx:
+        servers["brave-search"] = {
+            "command": "npx",
+            "args": ["-y", "@brave/brave-search-mcp-server"],
+            "env": {"BRAVE_API_KEY": os.environ["BRAVE_API_KEY"]},
+        }
+
+    if os.environ.get("FIRECRAWL_API_KEY") and has_npx:
+        servers["firecrawl"] = {
+            "command": "npx",
+            "args": ["-y", "firecrawl-mcp"],
+            "env": {"FIRECRAWL_API_KEY": os.environ["FIRECRAWL_API_KEY"]},
+        }
+
+    # Exa uses HTTP transport with OAuth — no API key needed
+    # but only include if user has authenticated (check for cookie/token)
+    if os.environ.get("EXA_API_KEY"):
+        # API key mode
+        servers["exa"] = {
+            "type": "http",
+            "url": "https://mcp.exa.ai/mcp",
+        }
+
+    # paper-search: check if the python module is installed
+    try:
+        import importlib.util
+        if importlib.util.find_spec("paper_search_mcp"):
+            servers["paper-search"] = {
+                "command": "python",
+                "args": ["-m", "paper_search_mcp.server"],
+            }
+    except (ImportError, ValueError):
+        pass
+
+    # crawl4ai via docker — only if docker is available
+    if _cmd_exists("docker"):
+        servers["crawl4ai"] = {
+            "command": "docker",
+            "args": ["run", "--rm", "-i", "uysalsadi/crawl4ai-mcp-server:latest"],
+        }
+
+    if os.environ.get("DIGIKEY_CLIENT_ID"):
+        digikey_dir = Path.home() / ".local" / "share" / "digikey-mcp"
+        if digikey_dir.exists() and _cmd_exists("uv"):
+            servers["digikey"] = {
+                "command": "uv",
+                "args": [
+                    "--directory", str(digikey_dir),
+                    "run", "python", "digikey_mcp_server.py",
+                ],
+            }
+
+    # Require at least one web search provider
+    has_search = any(
+        k in servers for k in ("brave-search", "exa", "firecrawl")
+    )
+    if not has_search:
+        return None
+
+    config = {"mcpServers": servers}
+    state_dir = report_dir / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    config_path = state_dir / "mcp.json"
+    config_path.write_text(json.dumps(config, indent=2))
+    return config_path
 
 
 def _extract_json(text: str) -> dict | None:
@@ -335,6 +465,7 @@ def spawn_agent(
     allowed_tools: Optional[list[str]] = None,
     stream_callback: Optional[Callable] = None,
     log_file: Optional[Path] = None,
+    mcp_config: Optional[Path] = None,
 ) -> AgentResult:
     """Spawn a single Claude agent and return its output.
 
@@ -346,6 +477,7 @@ def spawn_agent(
         cwd: Working directory for the agent
         allowed_tools: If provided, restrict agent to these tools only
         log_file: If provided, dump all raw stdout/stderr to this file
+        mcp_config: If provided, path to MCP server config file
 
     Returns:
         AgentResult with success status and output
@@ -377,9 +509,20 @@ def spawn_agent(
     if use_streaming:
         cmd.extend(["--verbose", "--output-format", "stream-json"])
 
-    # Add tool restrictions if specified
+    # Restrict built-in tools AND auto-approve all listed tools (built-in + MCP)
     if allowed_tools:
+        # --tools only restricts built-in tools (Read, Write, Bash, etc.)
+        builtin_tools = [t for t in allowed_tools if not t.startswith("mcp__")]
+        if builtin_tools:
+            cmd.extend(["--tools", ",".join(builtin_tools)])
+        # --allowedTools auto-approves and denies everything not listed
         cmd.extend(["--allowedTools", ",".join(allowed_tools)])
+
+    # Add MCP server config if provided
+    if mcp_config:
+        cmd.extend(["--mcp-config", str(mcp_config)])
+        # Ignore user's personal MCP servers — only use ours
+        cmd.append("--strict-mcp-config")
 
     process = None
     log_fh = None
@@ -517,6 +660,7 @@ def spawn_agent_with_retry(
     intervention_handler: "Optional[InterventionHandler]" = None,
     stream_callback: Optional[Callable] = None,
     log_file: Optional[Path] = None,
+    mcp_config: Optional[Path] = None,
 ) -> AgentResult:
     """Spawn agent with exponential backoff retry.
 
@@ -533,6 +677,7 @@ def spawn_agent_with_retry(
         intervention_handler: Optional InterventionHandler for interactive mode.
             When provided and a structural error occurs, the user is prompted
             to retry/skip/quit instead of silently returning failure.
+        mcp_config: If provided, path to MCP server config file
 
     Returns:
         AgentResult with success status, output, and retry count
@@ -559,6 +704,7 @@ def spawn_agent_with_retry(
             allowed_tools=allowed_tools,
             stream_callback=stream_callback,
             log_file=log_file,
+            mcp_config=mcp_config,
         )
         total_duration += result.duration_secs
 
@@ -680,6 +826,7 @@ def spawn_agents_parallel(
                     intervention_handler=intervention_handler,
                     stream_callback=task_stream_cb,
                     log_file=task_log_file,
+                    mcp_config=Path(task["mcp_config"]) if task.get("mcp_config") else None,
                 )
             except RuntimeError:
                 # Pool is shutting down

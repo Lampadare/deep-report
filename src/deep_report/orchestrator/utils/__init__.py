@@ -9,6 +9,7 @@ from .agents import (
     CircuitBreaker,
     ProcessTracker,
     process_tracker,
+    generate_mcp_config,
     AGENT_TOOLS,
     DEFAULT_TIMEOUT,
     DECISION_TIMEOUT,

@@ -11,6 +11,7 @@ from ..utils import (
     spawn_agent,
     spawn_agents_parallel,
     spawn_decision_agent,
+    generate_mcp_config,
     AgentResult,
     AGENT_TOOLS,
     DEFAULT_TIMEOUT,
@@ -211,6 +212,16 @@ def _run_research_batch(
     """Run a batch of research agents in parallel."""
 
     report_dir = Path(state.report_dir)
+
+    # Generate MCP config once per batch; select tool preset accordingly
+    mcp_config = generate_mcp_config(report_dir)
+    if mcp_config:
+        tool_preset = AGENT_TOOLS["research"]
+        ui.verbose(f"MCP config written to {mcp_config}")
+    else:
+        tool_preset = AGENT_TOOLS["research_fallback"]
+        ui.verbose("No MCP API keys found — using WebSearch/WebFetch fallback")
+
     tasks = []
 
     for thread in threads:
@@ -234,7 +245,8 @@ def _run_research_batch(
             expertise=state.expertise_level,
             report_type=state.report_type,
             iteration=iteration,
-            output_file=output_file
+            output_file=output_file,
+            use_mcp=mcp_config is not None,
         )
 
         tasks.append({
@@ -245,7 +257,8 @@ def _run_research_batch(
             "output_file": str(output_file),
             "timeout_secs": DEFAULT_TIMEOUT,
             "max_retries": 3,
-            "allowed_tools": AGENT_TOOLS["research"],
+            "allowed_tools": tool_preset,
+            "mcp_config": str(mcp_config) if mcp_config else None,
         })
 
     # Build thread info for live table display
@@ -342,6 +355,24 @@ def _run_research_batch(
                 elif name == "WebFetch":
                     url = data.get("url", "")[:80]
                     ui.verbose(f"[{thread_id}] WebFetch: {url}")
+                elif name.startswith("mcp__brave-search__"):
+                    query = data.get("query", "")[:80]
+                    ui.verbose(f"[{thread_id}] BraveSearch: {query}")
+                elif name.startswith("mcp__exa__"):
+                    query = data.get("query", "")[:80]
+                    ui.verbose(f"[{thread_id}] Exa: {query}")
+                elif name.startswith("mcp__paper-search__"):
+                    query = data.get("query", "")[:80]
+                    ui.verbose(f"[{thread_id}] Papers: {name.split('__')[-1]}: {query}")
+                elif name.startswith("mcp__firecrawl__"):
+                    url = data.get("url", "")[:80]
+                    ui.verbose(f"[{thread_id}] Firecrawl: {url}")
+                elif name.startswith("mcp__crawl4ai__"):
+                    url = data.get("url", "")[:80]
+                    ui.verbose(f"[{thread_id}] Crawl4AI: {url}")
+                elif name.startswith("mcp__digikey__"):
+                    kw = data.get("keywords", "")[:80]
+                    ui.verbose(f"[{thread_id}] DigiKey: {kw}")
                 elif name == "Write":
                     path = data.get("file_path", "")
                     fname = path.split("/")[-1] if "/" in path else path
@@ -393,11 +424,36 @@ def _build_research_prompt(
     expertise: str,
     report_type: str,
     iteration: int,
-    output_file: Path
+    output_file: Path,
+    use_mcp: bool = False,
 ) -> str:
     """Build the prompt for a research agent."""
 
     questions_text = "\n".join(f"- {q}" for q in questions) if questions else "- Explore the topic thoroughly"
+
+    if use_mcp:
+        search_section = """## Search Tools Available
+- **brave_web_search**: General web search (use for most queries)
+- **web_search_exa**: Semantic search (good for conceptual/academic queries)
+- **search_arxiv / search_pubmed / search_biorxiv / search_google_scholar**: Academic paper databases
+- **read_arxiv_paper / read_pubmed_paper / read_biorxiv_paper**: Read full paper text
+- **firecrawl_scrape**: Fetch and read any web page
+- **crawl4ai scrape**: Backup page fetcher with stealth browsing
+
+## Search Strategy
+1. Start with brave_web_search or web_search_exa for broad queries
+2. Use search_arxiv/search_pubmed for academic papers
+3. Use read_*_paper tools to read full paper content
+4. Use firecrawl_scrape to fetch specific web pages
+5. If firecrawl_scrape fails, try crawl4ai scrape as backup"""
+    else:
+        search_section = """## Search Tools
+Use WebSearch and WebFetch to find authoritative sources.
+
+## Search Strategy
+1. Use WebSearch for broad and specific queries
+2. Use WebFetch to read full content of promising URLs
+3. If WebFetch fails on a URL, skip it and try other sources"""
 
     return f"""You are a research agent. Investigate this aspect of the larger topic.
 
@@ -450,14 +506,16 @@ Your output should be:
 [List of key sources with URLs where available]
 ```
 
-Use WebSearch and WebFetch to find authoritative sources. Prioritize:
+{search_section}
+
+Prioritize:
 - Peer-reviewed papers (PubMed, arXiv, Google Scholar)
 - Official reports and documentation
 - Expert analyses from reputable institutions
 - Recent data (prefer last 3-5 years unless foundational)
 
 ## Resilience Rules
-- If a WebFetch call fails (403, timeout, sibling error), do NOT retry it. Move on to your next search or fetch — there are plenty of other sources to explore.
+- If a fetch or scrape call fails (403, timeout, error), do NOT retry it. Move on to your next search or fetch — there are plenty of other sources to explore.
 - Failed fetches should not interrupt your research flow. Keep searching, keep fetching other URLs, and only write the report once you have gathered enough material.
 - NEVER produce empty or placeholder responses like "No response requested."
 - You MUST write the output file even if some fetches fail — use everything you successfully gathered.
