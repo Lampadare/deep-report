@@ -70,6 +70,20 @@ else:
     custom_style = None
 
 
+# Double Ctrl+C exits interview cleanly with no metadata saved
+import time as _time
+_last_interview_ctrlc = [0.0]
+
+
+def _check_interview_exit():
+    """Call when Ctrl+C detected during interview. Second press within 3s raises."""
+    now = _time.monotonic()
+    if now - _last_interview_ctrlc[0] < 3.0:
+        raise KeyboardInterrupt
+    _last_interview_ctrlc[0] = now
+    ui.dim("Press Ctrl+C again within 3s to exit")
+
+
 OPTION_DESCRIPTIONS = {
     "report_type": {
         "deep-dive": "In-depth analysis of the latest developments and best practices",
@@ -163,7 +177,7 @@ def _prompt_choice(prompt: str, options: list[str], default: int = 0,
         ).ask()
 
         if result is None:  # Ctrl+C or Ctrl+D
-            ui.verbose("Ctrl+C detected, using defaults")
+            _check_interview_exit()
             ui.info(f"Using default: {options[default]}")
             return options[default]
 
@@ -172,6 +186,9 @@ def _prompt_choice(prompt: str, options: list[str], default: int = 0,
                 "Enter custom value (e.g., 'technical deep-dive with code examples'):",
                 style=custom_style
             ).ask()
+            if custom is None:
+                _check_interview_exit()
+                return options[default]
             return f"custom:{custom}" if custom else options[default]
 
         return result
@@ -233,7 +250,7 @@ def _prompt_int(prompt: str, default: int, min_val: int, max_val: int) -> int:
         ).ask()
 
         if result is None:
-            ui.verbose("Ctrl+C detected, using defaults")
+            _check_interview_exit()
             ui.info(f"Using default: {default}")
             return default
         if result == "":
@@ -262,7 +279,7 @@ def _prompt_yes_no(prompt: str, default: bool = True) -> bool:
     if QUESTIONARY_AVAILABLE:
         result = questionary.confirm(prompt, default=default, style=custom_style).ask()
         if result is None:
-            ui.verbose("Ctrl+C detected, using defaults")
+            _check_interview_exit()
             return default
         return result
     else:
@@ -345,7 +362,10 @@ def _prompt_seed_folder(cwd: Path) -> Optional[str]:
         except (ValueError, EOFError):
             result = choices[0]
 
-    if result is None or result == "None (skip)":
+    if result is None:
+        _check_interview_exit()
+        return None
+    if result == "None (skip)":
         return None
 
     if result == "Other folder...":
@@ -356,6 +376,9 @@ def _prompt_seed_folder(cwd: Path) -> Optional[str]:
                 only_directories=True,
                 style=custom_style
             ).ask()
+            if custom is None:
+                _check_interview_exit()
+                return None
         else:
             custom = input("Folder path: ").strip()
         if custom and not Path(custom).is_dir():
@@ -474,19 +497,41 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
     # Get AI recommendations (wait briefly for first prompt)
     recs = analyzer.get_recommendations(timeout=3.0)
 
-    # Report type - allow custom types like "technical deep-dive with code examples"
-    report_type_options = ["deep-dive", "tutorial", "comparison", "survey"]
-    # Use AI recommendation for default if available
-    # Map legacy "state-of-the-art" from AI recs to "deep-dive"
+    # Report type — use AI-suggested types if available, else hardcoded four
+    ai_report_types = recs.get("report_types") if recs else None
     rec_report_type = recs.get("report_type", "") if recs else ""
-    if rec_report_type == "state-of-the-art":
-        rec_report_type = "deep-dive"
-    if rec_report_type in report_type_options:
-        report_type_default = report_type_options.index(rec_report_type)
+
+    if ai_report_types and len(ai_report_types) >= 3:
+        report_type_options = [e["value"] for e in ai_report_types]
+        # Build Choice objects with AI-provided descriptions
+        if QUESTIONARY_AVAILABLE:
+            rec_reason = recs.get("report_type_reason", "") if recs else ""
+            report_type_choices = []
+            for entry in ai_report_types:
+                val = entry["value"]
+                desc = entry.get("description", "")
+                if val == rec_report_type and rec_reason:
+                    label = f"{val} (recommended)"
+                    full_desc = f"{desc} — {rec_reason}" if desc else rec_reason
+                    report_type_choices.append(Choice(label, value=val, description=full_desc))
+                else:
+                    report_type_choices.append(Choice(val, value=val, description=desc))
+        else:
+            report_type_choices = None
+        # Default to recommended
+        if rec_report_type in report_type_options:
+            report_type_default = report_type_options.index(rec_report_type)
+        else:
+            report_type_default = 0
     else:
-        report_type_default = topic_hints["report_type_default"]
-    report_type_choices = _build_choices(
-        report_type_options, "report_type", recs, "report_type")
+        report_type_options = ["deep-dive", "tutorial", "comparison", "survey"]
+        if rec_report_type in report_type_options:
+            report_type_default = report_type_options.index(rec_report_type)
+        else:
+            report_type_default = topic_hints["report_type_default"]
+        report_type_choices = _build_choices(
+            report_type_options, "report_type", recs, "report_type")
+
     report_type = _prompt_choice(
         "What type of report?",
         report_type_options,
@@ -818,11 +863,8 @@ Examples:
                 effective_expertise = recs["expertise"]
                 if effective_expertise != "intermediate":
                     ui.info(f"AI recommended: {effective_expertise} expertise ({recs.get('expertise_reason', '')})")
-            if args.report_type is None and recs.get("report_type") in ("state-of-the-art", "deep-dive", "tutorial", "comparison", "survey"):
-                rec_rt = recs["report_type"]
-                if rec_rt == "state-of-the-art":
-                    rec_rt = "deep-dive"
-                effective_report_type = rec_rt
+            if args.report_type is None and recs.get("report_type"):
+                effective_report_type = recs["report_type"]
                 if effective_report_type != "deep-dive":
                     ui.info(f"AI recommended: {effective_report_type} report type ({recs.get('report_type_reason', '')})")
             if args.agents is None and isinstance(recs.get("agent_count"), int):
@@ -867,12 +909,17 @@ Examples:
         'download_papers': args.download_papers,
         'audio': args.audio,
     }
-    config = run_configure_interview(
-        args.topic,
-        cwd=args.cwd,
-        existing_refs=args.refs,
-        defaults=defaults
-    )
+    try:
+        config = run_configure_interview(
+            args.topic,
+            cwd=args.cwd,
+            existing_refs=args.refs,
+            defaults=defaults
+        )
+    except KeyboardInterrupt:
+        print()
+        ui.info("Cancelled — no report created")
+        return 130
     if config is None:
         return 1
     # Extract interactive flag from config
@@ -1331,7 +1378,6 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
     ]
 
     # 3-tier Ctrl+C: 1st = warning only, 2nd within 3s = graceful shutdown, 3rd = force kill
-    import time as _time
     _last_ctrlc = [0.0]
     _shutting_down = [False]
 

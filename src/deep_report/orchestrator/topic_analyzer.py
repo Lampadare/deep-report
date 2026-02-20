@@ -12,6 +12,36 @@ from .utils import spawn_agent, extract_json
 PROFILE_DIR = Path.home() / ".deep-report"
 PROFILE_FILE = PROFILE_DIR / "profile.json"
 
+DEFAULT_REPORT_TYPES = [
+    {"value": "deep-dive", "description": "In-depth analysis of the latest developments and best practices"},
+    {"value": "tutorial", "description": "Step-by-step learning guide with examples"},
+    {"value": "comparison", "description": "Side-by-side analysis of approaches or technologies"},
+    {"value": "survey", "description": "Broad landscape overview of a field"},
+]
+
+
+def _validate_report_types(raw: list) -> list[dict]:
+    """Validate and sanitize AI-returned report_types array."""
+    if not isinstance(raw, list):
+        return DEFAULT_REPORT_TYPES
+    validated = []
+    seen = set()
+    for entry in raw[:10]:
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get("value", "")
+        desc = entry.get("description", "")
+        if not isinstance(value, str) or not value.strip():
+            continue
+        # Normalize to kebab-case
+        value = re.sub(r'[^a-z0-9-]', '-', value.strip().lower())
+        value = re.sub(r'-+', '-', value).strip('-')
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        validated.append({"value": value, "description": str(desc)[:120]})
+    return validated if len(validated) >= 3 else DEFAULT_REPORT_TYPES
+
 
 class TopicAnalyzer:
     """Analyzes a research topic to recommend interview defaults.
@@ -53,18 +83,23 @@ class TopicAnalyzer:
                     seed_info = f"Seed URLs: {self.seed_refs[:200]}"
 
             prompt = (
-                f"Analyze this research topic and recommend settings.\n"
+                f"Analyze this research topic and recommend report settings.\n\n"
                 f"Topic: {self.topic[:500]}\n"
-                f"{seed_info}\n"
-                f"Return ONLY a JSON object:\n"
-                f'{{"report_type": "deep-dive|tutorial|comparison|survey",'
-                f' "report_type_reason": "brief reason",'
-                f' "expertise": "beginner|intermediate|expert",'
-                f' "expertise_reason": "brief reason",'
-                f' "agent_count": 10,'
-                f' "agent_count_reason": "brief reason",'
-                f' "model": "sonnet|opus",'
-                f' "model_reason": "brief reason"}}'
+                f"{seed_info}\n\n"
+                f"Return ONLY a JSON object with these fields:\n"
+                f"- report_types: array of 5-10 report format options tailored to this topic. "
+                f"Each entry has \"value\" (kebab-case, 1-3 words) and \"description\" (1 sentence). "
+                f"Include the classic four (deep-dive, tutorial, comparison, survey) plus "
+                f"topic-specific formats that would produce a better output. "
+                f"Order by relevance to the topic.\n"
+                f"- report_type: the recommended value from report_types\n"
+                f"- report_type_reason: brief reason\n"
+                f"- expertise: beginner|intermediate|expert\n"
+                f"- expertise_reason: brief reason\n"
+                f"- agent_count: integer 3-30\n"
+                f"- agent_count_reason: brief reason\n"
+                f"- model: sonnet|opus\n"
+                f"- model_reason: brief reason\n"
             )
 
             result = spawn_agent(
@@ -77,6 +112,9 @@ class TopicAnalyzer:
             if result.success and result.output:
                 parsed = extract_json(result.output)
                 if parsed and "report_type" in parsed:
+                    # Validate report_types if present
+                    if "report_types" in parsed:
+                        parsed["report_types"] = _validate_report_types(parsed["report_types"])
                     self._result = parsed
         except Exception:
             pass
@@ -143,6 +181,7 @@ class TopicAnalyzer:
             agent_count_reason = "Standard coverage for this topic"
 
         return {
+            "report_types": DEFAULT_REPORT_TYPES,
             "report_type": report_type,
             "report_type_reason": report_type_reason,
             "expertise": expertise,
