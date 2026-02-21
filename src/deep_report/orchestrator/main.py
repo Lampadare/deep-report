@@ -127,11 +127,10 @@ def _build_choices(options: list[str], category: str, recs: Optional[dict] = Non
     for opt in options:
         desc = descs.get(opt, "")
         if rec_value == opt and rec_reason:
-            label = f"{opt} (recommended)"
-            full_desc = f"{desc} — {rec_reason}" if desc else rec_reason
-            choices.append(Choice(label, value=opt, description=full_desc))
+            label = f"{opt} — {desc} — {rec_reason} (recommended)" if desc else f"{opt} — {rec_reason} (recommended)"
         else:
-            choices.append(Choice(opt, value=opt, description=desc))
+            label = f"{opt} — {desc}" if desc else opt
+        choices.append(Choice(label, value=opt))
     return choices
 
 
@@ -494,8 +493,9 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
     # Smart defaults based on topic analysis (keyword fallback)
     topic_hints = _analyze_topic_defaults(brief or topic)
 
-    # Get AI recommendations (wait briefly for first prompt)
-    recs = analyzer.get_recommendations(timeout=3.0)
+    # Get AI recommendations (wait for background analysis to finish)
+    ui.dim("Analyzing topic for smart defaults...")
+    recs = analyzer.get_recommendations(timeout=60.0)
 
     # Report type — use AI-suggested types if available, else hardcoded four
     ai_report_types = recs.get("report_types") if recs else None
@@ -503,7 +503,7 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
 
     if ai_report_types and len(ai_report_types) >= 3:
         report_type_options = [e["value"] for e in ai_report_types]
-        # Build Choice objects with AI-provided descriptions
+        # Build Choice objects with description in the title (questionary truncates description=)
         if QUESTIONARY_AVAILABLE:
             rec_reason = recs.get("report_type_reason", "") if recs else ""
             report_type_choices = []
@@ -511,11 +511,10 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
                 val = entry["value"]
                 desc = entry.get("description", "")
                 if val == rec_report_type and rec_reason:
-                    label = f"{val} (recommended)"
-                    full_desc = f"{desc} — {rec_reason}" if desc else rec_reason
-                    report_type_choices.append(Choice(label, value=val, description=full_desc))
+                    label = f"{val} — {desc} (recommended)" if desc else f"{val} (recommended)"
                 else:
-                    report_type_choices.append(Choice(val, value=val, description=desc))
+                    label = f"{val} — {desc}" if desc else val
+                report_type_choices.append(Choice(label, value=val))
         else:
             report_type_choices = None
         # Default to recommended

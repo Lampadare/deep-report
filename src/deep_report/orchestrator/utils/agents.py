@@ -32,18 +32,18 @@ PLANNING_TIMEOUT = 1620  # 27 minutes
 AGENT_TOOLS = {
     "research": [
         "Read", "Glob", "Grep", "Write",
-        # Web search
+        # Web search (primary: built-in + exa for full-text; brave as fallback + news)
+        "WebSearch", "WebFetch",
+        "mcp__exa__web_search_exa",
+        "mcp__exa__get_code_context_exa",
+        "mcp__exa__company_research_exa",
         "mcp__brave-search__brave_web_search",
         "mcp__brave-search__brave_news_search",
-        "mcp__exa__web_search_exa",
-        # Academic papers
+        # Academic papers (only working tools)
         "mcp__paper-search__search_arxiv",
         "mcp__paper-search__search_pubmed",
-        "mcp__paper-search__search_biorxiv",
-        "mcp__paper-search__search_google_scholar",
         "mcp__paper-search__read_arxiv_paper",
-        "mcp__paper-search__read_pubmed_paper",
-        "mcp__paper-search__read_biorxiv_paper",
+        "mcp__paper-search__read_medrxiv_paper",
         # Page fetching
         "mcp__firecrawl__firecrawl_scrape",
         "mcp__crawl4ai__scrape",

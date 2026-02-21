@@ -20,6 +20,16 @@ DEFAULT_REPORT_TYPES = [
 ]
 
 
+def _prepend_to_defaults(value: str, reason: str = "") -> list[dict]:
+    """Build report_types list by prepending the AI recommendation to defaults."""
+    value = re.sub(r'[^a-z0-9-]', '-', value.strip().lower())
+    value = re.sub(r'-+', '-', value).strip('-')
+    if not value or value in {e["value"] for e in DEFAULT_REPORT_TYPES}:
+        return DEFAULT_REPORT_TYPES
+    desc = reason[:120] if reason else f"AI-recommended format for this topic"
+    return [{"value": value, "description": desc}] + DEFAULT_REPORT_TYPES
+
+
 def _validate_report_types(raw: list) -> list[dict]:
     """Validate and sanitize AI-returned report_types array."""
     if not isinstance(raw, list):
@@ -105,16 +115,21 @@ class TopicAnalyzer:
             result = spawn_agent(
                 prompt,
                 model="sonnet",
-                timeout_secs=15,
+                timeout_secs=60,
                 allowed_tools=[],
             )
 
             if result.success and result.output:
                 parsed = extract_json(result.output)
                 if parsed and "report_type" in parsed:
-                    # Validate report_types if present
+                    # Validate report_types if present, or synthesize from report_type
                     if "report_types" in parsed:
                         parsed["report_types"] = _validate_report_types(parsed["report_types"])
+                    else:
+                        # AI returned report_type but not the array — prepend it to defaults
+                        rec = parsed["report_type"]
+                        reason = parsed.get("report_type_reason", "")
+                        parsed["report_types"] = _prepend_to_defaults(rec, reason)
                     self._result = parsed
         except Exception:
             pass

@@ -267,7 +267,7 @@ def _run_research_batch(
     # Safe defaults: opus→3 concurrent, sonnet→8 concurrent.
     model = state.research_model
     if model == "opus":
-        max_workers = min(len(tasks), 2)
+        max_workers = min(len(tasks), 5)
     else:
         max_workers = min(len(tasks), 5)
     concurrent_note = f" — {max_workers} concurrent" if len(tasks) > max_workers else ""
@@ -436,26 +436,28 @@ def _build_research_prompt(
 
     if use_mcp:
         search_section = """## Search Tools Available
-- **mcp__brave-search__brave_web_search**: General web search (use for most queries)
-- **mcp__brave-search__brave_news_search**: News search (use for recent events and current developments)
-- **mcp__exa__web_search_exa**: Semantic search (good for conceptual/academic queries)
-- **mcp__paper-search__search_arxiv**: Search arXiv papers
-- **mcp__paper-search__search_pubmed**: Search PubMed papers
-- **mcp__paper-search__search_biorxiv**: Search bioRxiv papers
-- **mcp__paper-search__search_google_scholar**: Search Google Scholar
-- **mcp__paper-search__read_arxiv_paper**: Read full arXiv paper text
-- **mcp__paper-search__read_pubmed_paper**: Read full PubMed paper text
-- **mcp__paper-search__read_biorxiv_paper**: Read full bioRxiv paper text
-- **mcp__firecrawl__firecrawl_scrape**: Fetch and read any web page
-- **mcp__crawl4ai__scrape**: Backup page fetcher with stealth browsing
+- **WebSearch**: Quick factual lookups and general questions (returns summary + links)
+- **WebFetch**: Read a specific URL you already have (converts to markdown)
+- **mcp__exa__web_search_exa**: Deep research — returns full article text inline, not just snippets
+- **mcp__exa__get_code_context_exa**: Code, API docs, technical questions (searches GitHub, Stack Overflow, official docs)
+- **mcp__exa__company_research_exa**: Deep company intelligence (funding, team, tech stack, competitors)
+- **mcp__brave-search__brave_web_search**: Filtered search — use freshness param for date-bounded queries
+- **mcp__brave-search__brave_news_search**: Breaking/recent news with time control (freshness defaults to 24h)
+- **mcp__paper-search__search_arxiv**: Search arXiv preprints (use specific/narrow queries)
+- **mcp__paper-search__search_pubmed**: Search PubMed (best academic search — biomedical/clinical)
+- **mcp__paper-search__read_arxiv_paper**: Read full arXiv paper text (large output — be selective)
+- **mcp__paper-search__read_medrxiv_paper**: Read full medRxiv paper text
+- **mcp__firecrawl__firecrawl_scrape**: Clean page extraction (supports onlyMainContent, JS actions)
+- **mcp__crawl4ai__scrape**: Free backup page fetcher with stealth browsing
 
 ## Search Strategy
-1. Start with mcp__brave-search__brave_web_search or mcp__exa__web_search_exa for broad queries
-2. Use mcp__brave-search__brave_news_search for recent events or news-sensitive topics
-3. Use mcp__paper-search__search_arxiv / mcp__paper-search__search_pubmed for academic papers
-4. Use mcp__paper-search__read_arxiv_paper etc. to read full paper content
-5. Use mcp__firecrawl__firecrawl_scrape to fetch specific web pages
-6. If firecrawl fails, try mcp__crawl4ai__scrape as backup"""
+1. Start with **WebSearch** for quick factual queries or **mcp__exa__web_search_exa** for deep research
+2. Use **mcp__exa__get_code_context_exa** for code/API/technical documentation questions
+3. Use **mcp__brave-search__brave_news_search** for recent events or news-sensitive topics
+4. Use **mcp__paper-search__search_pubmed** for biomedical/clinical literature
+5. Use **mcp__paper-search__search_arxiv** for CS/ML/physics preprints (use narrow queries)
+6. Use **mcp__firecrawl__firecrawl_scrape** to fetch specific web pages; **mcp__crawl4ai__scrape** as backup
+7. Use **WebFetch** for lightweight page reads when you just need a summary of a URL"""
     else:
         search_section = """## Search Tools
 Use WebSearch and WebFetch to find authoritative sources.
