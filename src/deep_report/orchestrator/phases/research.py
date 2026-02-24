@@ -121,7 +121,8 @@ def run_research(
             ui.decision(
                 iteration,
                 decision.get('sufficient', True),
-                decision.get('reasoning', 'N/A')
+                decision.get('reasoning', 'N/A'),
+                coverage=decision.get('coverage'),
             )
 
             if progress:

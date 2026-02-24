@@ -794,8 +794,9 @@ class DeepReportUI:
                 self._research_live = None
         self.cleanup_thread_metadata()
 
-    def decision(self, iteration: int, sufficient: bool, reasoning: str):
-        """Display decision agent result."""
+    def decision(self, iteration: int, sufficient: bool, reasoning: str,
+                 coverage: dict = None):
+        """Display decision agent result with optional coverage breakdown."""
         if RICH_AVAILABLE:
             if sufficient:
                 status = f"[bold {theme.success}]Complete[/] — enough material for your report"
@@ -803,6 +804,35 @@ class DeepReportUI:
                 status = f"[bold {theme.warning}]More research needed[/] — follow-up round proposed"
             self.console.print(f"\n[bold]Research coverage check:[/] {status}")
             self.console.print(f"  [{theme.dim}]{reasoning}[/]")
+
+            if coverage and isinstance(coverage, dict):
+                table = Table(show_header=True, box=ROUNDED, padding=(0, 1))
+                table.add_column("Area", style="white", min_width=20)
+                table.add_column("Score", justify="center", width=7)
+                table.add_column("Status", style=theme.dim)
+
+                for area, info in coverage.items():
+                    if not isinstance(info, dict):
+                        continue
+                    try:
+                        score = int(info.get("score", 0) or 0)
+                    except (TypeError, ValueError):
+                        score = 0
+                    note = info.get("note", "")
+                    if score >= 80:
+                        score_style = f"bold {theme.success}"
+                    elif score >= 50:
+                        score_style = f"bold {theme.warning}"
+                    else:
+                        score_style = f"bold {theme.error}"
+                    table.add_row(area[:60], f"[{score_style}]{score}%[/]", str(note))
+
+                self.console.print(Panel(
+                    table,
+                    title="[bold]Coverage Breakdown[/]",
+                    border_style=theme.border,
+                    padding=(0, 1),
+                ))
         else:
             if sufficient:
                 status = "Complete — enough material for your report"
@@ -810,6 +840,18 @@ class DeepReportUI:
                 status = "More research needed — follow-up round proposed"
             print(f"\nResearch coverage check: {status}")
             print(f"  {reasoning}")
+
+            if coverage and isinstance(coverage, dict):
+                print("\n  Coverage Breakdown:")
+                for area, info in coverage.items():
+                    if not isinstance(info, dict):
+                        continue
+                    try:
+                        score = int(info.get("score", 0) or 0)
+                    except (TypeError, ValueError):
+                        score = 0
+                    note = info.get("note", "")
+                    print(f"    {area[:60]}: {score}% — {note}")
 
     def plan_summary(self, threads: list[dict]):
         """Display research plan threads in a table (width-adaptive)."""

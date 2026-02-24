@@ -235,31 +235,245 @@ class ApprovalGate:
         return self.request_approval("pre_research", metadata)
 
     def iteration_gate(self, state, decision: dict, iteration: int) -> bool:
-        """Approval gate before starting a new iteration."""
-        # Count proposed follow-ups
-        followup_count = (
-            len(decision.get("gaps", [])) +
-            len(decision.get("conflicts", [])) +
-            len(decision.get("deepen", []))
-        )
+        """Approval gate before starting a new iteration.
 
-        # Get current research stats (metadata only)
+        Shows coverage scores, numbered suggestions, and lets the user:
+        - Enter: approve all suggestions
+        - Comma-separated numbers: select specific suggestions
+        - +text: add custom direction (combinable with numbers)
+        - s: stop & synthesize
+        - q: quit
+
+        Mutates decision dict in-place to filter gaps/conflicts/deepen
+        based on user selection.
+        """
+        if not self.interactive:
+            return True
+
         research_meta = self.get_research_metadata(state)
 
-        metadata = {
-            "current_iteration": iteration,
-            "proposed_followups": followup_count,
-            "decision_reasoning": decision.get("reasoning", "")[:200],
-            "gaps": decision.get("gaps", []),
-            "conflicts": decision.get("conflicts", []),
-            "deepen": decision.get("deepen", []),
-            **research_meta,
-        }
+        # Build numbered suggestion list
+        suggestions = []
+        for gap in decision.get("gaps", []):
+            suggestions.append(("gap", gap))
+        for conflict in decision.get("conflicts", []):
+            suggestions.append(("conflict", conflict))
+        for area in decision.get("deepen", []):
+            suggestions.append(("deepen", area))
 
-        return self.request_approval(
-            f"iteration_{iteration + 1}", metadata,
-            gate_type=self.GATE_PROCEED_STOP_QUIT
-        )
+        coverage = decision.get("coverage")
+        gate_id = f"iteration_{iteration + 1}"
+        requested_at = datetime.now().isoformat()
+
+        if self.progress:
+            self.progress.approval_waiting(gate_id)
+
+        # Write pending status immediately (so crash during input leaves a trace)
+        self._save_gate_status(gate_id, "pending", requested_at)
+
+        while True:
+            if RICH_AVAILABLE:
+                console = Console()
+                console.print()
+
+                # Coverage table
+                if coverage and isinstance(coverage, dict):
+                    cov_table = Table(show_header=True, box=None, padding=(0, 1))
+                    cov_table.add_column("Area", style="white", min_width=20)
+                    cov_table.add_column("Score", justify="center", width=7)
+                    cov_table.add_column("Status", style="dim")
+                    for area, info in coverage.items():
+                        if not isinstance(info, dict):
+                            continue
+                        score = info.get("score", 0)
+                        note = info.get("note", "")
+                        if score >= 80:
+                            ss = "bold green"
+                        elif score >= 50:
+                            ss = "bold yellow"
+                        else:
+                            ss = "bold red"
+                        cov_table.add_row(area, f"[{ss}]{score}%[/]", str(note))
+                    console.print(cov_table)
+                    console.print()
+
+                # Research stats
+                stats = Table(show_header=False, box=None, padding=(0, 2))
+                stats.add_column("Key", style="dim cyan")
+                stats.add_column("Value", style="white")
+                stats.add_row("Iteration", str(iteration))
+                stats.add_row("Completed Agents", str(research_meta.get("completed_agents", 0)))
+                stats.add_row("Total Words", str(research_meta.get("total_research_words", 0)))
+                if decision.get("estimated_additional_cost"):
+                    stats.add_row("Est. Additional Cost", decision["estimated_additional_cost"])
+                console.print(stats)
+                console.print()
+
+                # Reasoning
+                console.print(f"[bold]Reasoning:[/] {decision.get('reasoning', 'N/A')[:200]}")
+                console.print()
+
+                # Numbered suggestions
+                if suggestions:
+                    console.print("[bold]Proposed follow-ups:[/]")
+                    type_colors = {"gap": "red", "conflict": "yellow", "deepen": "cyan"}
+                    for i, (stype, text) in enumerate(suggestions, 1):
+                        color = type_colors.get(stype, "white")
+                        label = stype.upper()
+                        console.print(f"  [bold]{i}.[/] [{color}][{label}][/] {text}")
+                    console.print()
+
+                # Options
+                options_lines = ["[green]Enter[/]      Approve all follow-ups"]
+                if suggestions:
+                    options_lines.append("[cyan]1,3,5[/]     Select specific follow-ups")
+                options_lines.append("[magenta]+text[/]     Add custom direction (e.g. 1,3,+my topic)")
+                options_lines.append("[yellow]s[/]         Stop researching, synthesize now")
+                options_lines.append("[red]q[/]         Quit (progress saved)")
+                console.print(Panel(
+                    "\n".join(options_lines),
+                    title="[bold yellow]ITERATION GATE[/]",
+                    subtitle=f"[dim]{gate_id}[/]",
+                    border_style="yellow",
+                    padding=(0, 2),
+                ))
+
+                try:
+                    response = console.input("[bold]Choice:[/] ").strip()
+                except EOFError:
+                    ui.warning("No interactive input available — rejecting for safety")
+                    response = "q"
+            else:
+                # Plain-text fallback
+                print(f"\n{'='*60}")
+                print(f"ITERATION GATE — iteration {iteration}")
+                print(f"{'='*60}")
+
+                if coverage and isinstance(coverage, dict):
+                    print("\nCoverage:")
+                    for area, info in coverage.items():
+                        if isinstance(info, dict):
+                            print(f"  {area}: {info.get('score', 0)}% — {info.get('note', '')}")
+
+                print(f"\nIteration: {iteration}")
+                print(f"Completed: {research_meta.get('completed_agents', 0)} agents, {research_meta.get('total_research_words', 0)} words")
+                if decision.get("estimated_additional_cost"):
+                    print(f"Est. cost: {decision['estimated_additional_cost']}")
+                print(f"\nReasoning: {decision.get('reasoning', 'N/A')[:200]}")
+
+                if suggestions:
+                    print("\nProposed follow-ups:")
+                    for i, (stype, text) in enumerate(suggestions, 1):
+                        print(f"  {i}. [{stype.upper()}] {text}")
+
+                if suggestions:
+                    print(f"\n  Enter = approve all | 1,3,5 = select | +text = add custom")
+                else:
+                    print(f"\n  Enter = approve all | +text = add custom direction")
+                print(f"  s = stop & synthesize | q = quit")
+
+                try:
+                    response = input("Choice: ").strip()
+                except EOFError:
+                    ui.warning("No interactive input available — rejecting for safety")
+                    response = "q"
+
+            # --- Handle response ---
+            r = response.lower()
+            if r == "q":
+                self._save_gate_status(gate_id, "quit", requested_at)
+                if self.progress:
+                    self.progress.approval_received(gate_id, False)
+                raise KeyboardInterrupt("User quit at approval gate")
+
+            if r == "s":
+                self._save_gate_status(gate_id, "stopped_early", requested_at)
+                if self.progress:
+                    self.progress.approval_received(gate_id, False)
+                return False
+
+            if r == "":
+                # Approve all — no filtering
+                self._save_gate_status(gate_id, "approved", requested_at)
+                if self.progress:
+                    self.progress.approval_received(gate_id, True)
+                return True
+
+            # Parse selection: numbers and +custom entries
+            selected_indices = set()
+            custom_directions = []
+            valid = True
+
+            for part in response.split(","):
+                part = part.strip()
+                if part.startswith("+"):
+                    custom_text = part[1:].strip()
+                    if custom_text:
+                        custom_directions.append(custom_text)
+                    else:
+                        ui.warning("Empty custom direction ignored — use +your topic")
+                        valid = False
+                elif part:
+                    try:
+                        idx = int(part)
+                        if not suggestions:
+                            ui.warning("No suggestions available to select")
+                            valid = False
+                        elif 1 <= idx <= len(suggestions):
+                            selected_indices.add(idx - 1)
+                        else:
+                            ui.warning(f"'{idx}' out of range (1-{len(suggestions)})")
+                            valid = False
+                    except ValueError:
+                        ui.warning(f"Unrecognized input '{part}'. Use numbers, +text, s, or q")
+                        valid = False
+
+            if not valid:
+                continue  # Re-prompt on any parse error
+
+            # Filter decision dict in-place
+            if selected_indices or custom_directions:
+                new_gaps = []
+                new_conflicts = []
+                new_deepen = []
+
+                for i, (stype, text) in enumerate(suggestions):
+                    if i in selected_indices:
+                        if stype == "gap":
+                            new_gaps.append(text)
+                        elif stype == "conflict":
+                            new_conflicts.append(text)
+                        elif stype == "deepen":
+                            new_deepen.append(text)
+
+                for custom in custom_directions:
+                    new_deepen.append(custom)
+
+                decision["gaps"] = new_gaps
+                decision["conflicts"] = new_conflicts
+                decision["deepen"] = new_deepen
+
+            self._save_gate_status(gate_id, "approved", requested_at)
+            if self.progress:
+                self.progress.approval_received(gate_id, True)
+            return True
+
+    def _save_gate_status(self, gate_id: str, status: str,
+                          requested_at: str = None):
+        """Persist gate status to approval file."""
+        request = {
+            "gate_id": gate_id,
+            "status": status,
+        }
+        if requested_at:
+            request["requested_at"] = requested_at
+        if status != "pending":
+            request["responded_at"] = datetime.now().isoformat()
+        try:
+            self.approval_file.parent.mkdir(parents=True, exist_ok=True)
+            self.approval_file.write_text(json.dumps(request, indent=2))
+        except Exception:
+            pass
 
     def pre_synthesis_gate(self, state) -> bool:
         """Approval gate before synthesis (optional)."""

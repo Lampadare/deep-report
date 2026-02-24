@@ -919,10 +919,21 @@ Return a JSON object (and ONLY a JSON object, no other text):
 {{
     "sufficient": true/false,
     "reasoning": "1-2 sentence explanation",
+    "coverage": {{
+        "area name": {{"score": 0-100, "note": "brief status"}},
+        "another area": {{"score": 0-100, "note": "brief status"}}
+    }},
     "gaps": ["area1 not covered", "area2 missing"],
     "conflicts": ["finding X vs finding Y need resolution"],
     "deepen": ["area1 needs more detail", "area2 needs more sources"]
 }}
+
+Coverage scoring guide:
+- 80-100: Well covered with strong evidence and multiple sources
+- 50-79: Partially covered, has gaps or limited sourcing
+- 0-49: Poorly covered, needs significant additional research
+
+Map each major topic area from the research brief to a coverage entry.
 
 If iteration >= {max_iterations}, set sufficient=true regardless.
 If there are no significant gaps/conflicts/areas to deepen, set sufficient=true.
