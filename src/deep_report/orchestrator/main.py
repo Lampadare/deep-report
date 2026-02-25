@@ -727,7 +727,7 @@ Examples:
     parser.add_argument("--quick", action="store_true",
                         help="Skip interview, use sensible defaults")
     parser.add_argument("--interactive", action="store_true",
-                        help="Ask for your OK before spending money on research and before each follow-up round")
+                        help="Ask for your OK before spending money on research and before each follow-up round (shows per-area coverage scores and suggested directions)")
     parser.add_argument("--model", default=None, choices=["sonnet", "opus"],
                         help="Model for research agents (default: sonnet)")
     def _validate_agents(value):
@@ -747,8 +747,7 @@ Examples:
                         choices=["beginner", "intermediate", "expert"],
                         help="Expertise level (beginner/intermediate/expert)")
     parser.add_argument("--report-type", default=None,
-                        choices=["deep-dive", "tutorial", "comparison", "survey"],
-                        help="Report type (deep-dive/tutorial/comparison/survey)")
+                        help="Report type (e.g. deep-dive, tutorial, comparison, survey — AI may suggest additional types based on your topic)")
     parser.add_argument("--resume", help="Resume from existing report directory")
     parser.add_argument("--list", "-l", action="store_true",
                         help="List unfinished reports and resume one")
@@ -1161,7 +1160,7 @@ That's it! An **interactive interview** will walk you through all the options:
 - How many research agents to use
 - Which model (Sonnet or Opus)
 - Target expertise level
-- Report type
+- Report type (AI suggests formats tailored to your topic)
 - Whether to add seed references
 
 **All flags are optional** - the interview covers everything. Use `--quick` only
@@ -1182,9 +1181,10 @@ if you want to skip the interview and use sensible defaults.
 - Shows estimated cost before proceeding
 
 ### Phase 3: Research ← *This is where the magic happens*
-- Spawns parallel Claude agents (each with web search)
+- Spawns parallel Claude agents with web search, academic databases, and news tools
 - Agents write 3,000-6,000 word research files
-- A decision agent evaluates coverage and may request follow-ups
+- A decision agent scores coverage per area and suggests follow-up directions
+- In `--interactive` mode, you see coverage scores and pick which directions to pursue
 - Iterates until research is deemed sufficient
 
 ### Phase 4: Synthesis
@@ -1205,7 +1205,7 @@ if you want to skip the interview and use sensible defaults.
 | **Start** | Topic (required) |
 | **Interview** | The interview guides you through all options |
 | **Pre-research** | Approve plan and cost estimate (with `--interactive`) |
-| **Iterations** | Approve follow-up research rounds (with `--interactive`) |
+| **Iterations** | Review coverage scores, select follow-up directions (with `--interactive`) |
 
 ---
 
