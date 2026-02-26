@@ -31,6 +31,7 @@ Options:
 
 import argparse
 import re
+import shutil
 import signal
 import sys
 from pathlib import Path
@@ -130,8 +131,14 @@ def _build_choices(options: list[str], category: str, recs: Optional[dict] = Non
             label = f"{opt} — {desc} — {rec_reason} (recommended)" if desc else f"{opt} — {rec_reason} (recommended)"
         else:
             label = f"{opt} — {desc}" if desc else opt
-        choices.append(Choice(label, value=opt))
+        choices.append(Choice(_truncate_choice_label(label), value=opt))
     return choices
+
+
+def _truncate_choice_label(label: str) -> str:
+    """Truncate a choice label to fit within terminal width."""
+    max_w = max(10, shutil.get_terminal_size().columns - 6)  # questionary arrow prefix
+    return label if len(label) <= max_w else label[:max_w - 1] + "…"
 
 
 def _prompt_choice(prompt: str, options: list[str], default: int = 0,
@@ -514,7 +521,7 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
                     label = f"{val} — {desc} (recommended)" if desc else f"{val} (recommended)"
                 else:
                     label = f"{val} — {desc}" if desc else val
-                report_type_choices.append(Choice(label, value=val))
+                report_type_choices.append(Choice(_truncate_choice_label(label), value=val))
         else:
             report_type_choices = None
         # Default to recommended

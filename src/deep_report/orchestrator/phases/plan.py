@@ -117,11 +117,24 @@ def _gather_seed_summaries(report_dir: Path) -> str:
     return "\n\n".join(context)
 
 
-def _generate_plan(state: State, scope: str, seed_context: str) -> dict | None:
+def _generate_plan(state: State, scope: str, seed_context: str,
+                   feedback: str = "") -> dict | None:
     """Use an agent to generate the research plan."""
 
     # Use brief if available (detailed research instructions), otherwise topic
     research_instructions = state.brief or state.topic
+
+    feedback_section = ""
+    if feedback:
+        feedback_section = f"""
+## User Feedback on Previous Plan
+The user reviewed an earlier version of this plan and provided feedback.
+Incorporate this feedback into the revised plan:
+
+<user-feedback>
+{feedback}
+</user-feedback>
+"""
 
     prompt = f"""You are a research planning agent. Create a research plan for this topic.
 
@@ -141,7 +154,7 @@ def _generate_plan(state: State, scope: str, seed_context: str) -> dict | None:
 {scope}
 
 {f"## Background from Seeds{chr(10)}{seed_context}" if seed_context else ""}
-
+{feedback_section}
 ## Task
 Decompose this topic into {state.agent_count} distinct research threads. Each thread should:
 - Cover a specific aspect/subtopic
@@ -302,3 +315,73 @@ def _write_plan_file(state: State, plan: dict, plan_file: Path):
         plan_file.write_text("\n".join(lines))
     except (OSError, PermissionError) as e:
         raise OSError(f"Failed to write plan file: {e}") from e
+
+
+def replan_with_feedback(state: State, feedback: str) -> bool:
+    """Re-generate the research plan incorporating user feedback.
+
+    Re-reads scope and seed context, appends feedback to the planning prompt,
+    and updates state with the new plan.
+    """
+    report_dir = Path(state.report_dir)
+
+    scope_file = report_dir / "state" / "scope.md"
+    scope_content = scope_file.read_text() if scope_file.exists() else ""
+    seed_context = _gather_seed_summaries(report_dir)
+
+    ui.step("Re-generating research plan with feedback")
+    plan = _generate_plan(state, scope_content, seed_context, feedback=feedback)
+
+    if not plan:
+        ui.error("Failed to re-generate research plan")
+        return False
+
+    state.threads = plan["threads"]
+    state.estimated_cost = plan["estimated_cost"]
+    state.completed_threads = []
+    state.failed_threads = []
+    state.save()
+    state.checkpoint("plan_revised")
+
+    # Re-display plan tree
+    try:
+        from rich.tree import Tree
+        from rich.panel import Panel
+
+        tree = Tree(f"[bold]📋 Research Plan (revised)[/] — {len(state.threads)} threads",
+                    guide_style="blue")
+        for thread in state.threads:
+            tid = thread.get("id", "?")
+            title = thread.get("title", tid)
+            branch = tree.add(f"[bold cyan]{tid}. {title}[/]")
+            objective = thread.get("objective", "")
+            if objective:
+                branch.add(f"[dim]{objective}[/]")
+            questions = thread.get("questions", [])
+            if questions:
+                q_branch = branch.add("[dim]Questions[/]")
+                for q in questions[:3]:
+                    q_branch.add(f"[dim]• {q}[/]")
+
+        ui.console.print()
+        ui.console.print(Panel(tree, border_style="blue"))
+    except ImportError:
+        ui.plan_summary(state.threads)
+
+    coverage = plan.get("coverage_notes", "")
+    if coverage:
+        ui.info(f"Coverage: {coverage}")
+    gaps = plan.get("potential_gaps", [])
+    if gaps:
+        ui.info(f"Potential gaps: {', '.join(gaps[:3])}")
+
+    # Overwrite plan file
+    plan_file = report_dir / "state" / "plan.md"
+    try:
+        _write_plan_file(state, plan, plan_file)
+    except (OSError, PermissionError) as e:
+        ui.error(f"Failed to write plan file: {e}")
+        return False
+
+    ui.info(f"Revised: {len(state.threads)} threads, estimated cost: ${state.estimated_cost:.2f}")
+    return True

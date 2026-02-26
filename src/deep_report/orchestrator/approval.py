@@ -51,16 +51,18 @@ class ApprovalGate:
     GATE_PROCEED_STOP_QUIT = "proceed_stop_quit"   # Enter=proceed, s=stop & synthesize, q=quit
 
     def request_approval(self, gate_id: str, metadata: dict,
-                         gate_type: str = "proceed_or_quit") -> bool:
+                         gate_type: str = "proceed_or_quit",
+                         allow_feedback: bool = False) -> bool | str:
         """Request user approval. Blocks until approved or rejected.
 
         Args:
             gate_id: Identifier for this approval gate
             metadata: Dict of metadata to show user (NEVER content)
             gate_type: Controls option set — "proceed_or_quit" or "proceed_stop_quit"
+            allow_feedback: If True, add 'f' option to provide feedback (returns str)
 
         Returns:
-            True if approved (proceed), False if stopped early (synthesize now)
+            True if approved, False if stopped early, or str with feedback text
         """
         if not self.interactive:
             return True  # Auto-approve in non-interactive mode
@@ -115,13 +117,21 @@ class ApprovalGate:
 
                 console.print()
                 console.print("  [green]Enter[/]  Proceed")
+                if allow_feedback:
+                    console.print("  [cyan]f[/]      Provide feedback to revise the plan")
                 if is_iteration:
                     console.print("  [yellow]s[/]      Stop researching, synthesize now")
                 console.print("  [red]q[/]      Quit (progress saved, resume later)")
                 console.print()
 
                 try:
-                    prompt = "[bold]Proceed?[/] " + ("[Enter/s/q]: " if is_iteration else "[Enter/q]: ")
+                    opts = "[Enter"
+                    if allow_feedback:
+                        opts += "/f"
+                    if is_iteration:
+                        opts += "/s"
+                    opts += "/q]: "
+                    prompt = f"[bold]Proceed?[/] {opts}"
                     response = console.input(prompt).strip().lower()
                 except EOFError:
                     ui.warning("No interactive input available — rejecting for safety")
@@ -137,13 +147,21 @@ class ApprovalGate:
                 print(f"{'='*60}")
                 print()
                 print("  [Enter]  Proceed")
+                if allow_feedback:
+                    print("  [f]      Provide feedback to revise the plan")
                 if is_iteration:
                     print("  [s]      Stop researching, synthesize now")
                 print("  [q]      Quit (progress saved, resume later)")
                 print()
 
                 try:
-                    prompt = "Proceed? " + ("[Enter/s/q]: " if is_iteration else "[Enter/q]: ")
+                    opts = "[Enter"
+                    if allow_feedback:
+                        opts += "/f"
+                    if is_iteration:
+                        opts += "/s"
+                    opts += "/q]: "
+                    prompt = f"Proceed? {opts}"
                     response = input(prompt).strip().lower()
                 except EOFError:
                     ui.warning("No interactive input available — rejecting for safety")
@@ -151,15 +169,38 @@ class ApprovalGate:
 
             if response == 'q':
                 break
+            elif response == 'f' and allow_feedback:
+                # Prompt for feedback text
+                try:
+                    if RICH_AVAILABLE:
+                        feedback = Console().input("[bold]Feedback:[/] ").strip()
+                    else:
+                        feedback = input("Feedback: ").strip()
+                except EOFError:
+                    feedback = ""
+                if feedback:
+                    request["status"] = "feedback"
+                    request["feedback"] = feedback
+                    request["responded_at"] = datetime.now().isoformat()
+                    try:
+                        self.approval_file.write_text(json.dumps(request, indent=2))
+                    except Exception:
+                        pass
+                    return feedback
+                ui.warning("Empty feedback, try again")
+                continue
             elif response in ('s',) and is_iteration:
                 break
             elif response == '':
                 break
             else:
+                opts = "Enter (proceed)"
+                if allow_feedback:
+                    opts += ", f (feedback)"
                 if is_iteration:
-                    ui.warning(f"Unrecognized input '{response}'. Options: Enter (proceed), s (stop & synthesize), q (quit, progress saved)")
-                else:
-                    ui.warning(f"Unrecognized input '{response}'. Options: Enter (proceed), q (quit, progress saved)")
+                    opts += ", s (stop & synthesize)"
+                opts += ", q (quit)"
+                ui.warning(f"Unrecognized input '{response}'. Options: {opts}")
                 continue
 
         if response == 'q':
@@ -218,9 +259,13 @@ class ApprovalGate:
             "max_iterations": max_iterations,
         }
 
-    def pre_research_gate(self, state) -> bool:
-        """Approval gate before starting research."""
-        # Defensive checks for state attributes
+    def pre_research_gate(self, state) -> bool | str:
+        """Approval gate before starting research.
+
+        Returns:
+            True to proceed, str with feedback for re-planning.
+            Raises KeyboardInterrupt on quit.
+        """
         threads = getattr(state, 'threads', [])
         research_model = getattr(state, 'research_model', 'unknown')
         estimated_cost = getattr(state, 'estimated_cost', 0.0)
@@ -232,7 +277,8 @@ class ApprovalGate:
             "estimated_cost": f"${estimated_cost:.2f}",
             "max_iterations": max_iterations,
         }
-        return self.request_approval("pre_research", metadata)
+        return self.request_approval("pre_research", metadata,
+                                      allow_feedback=True)
 
     def iteration_gate(self, state, decision: dict, iteration: int) -> bool:
         """Approval gate before starting a new iteration.

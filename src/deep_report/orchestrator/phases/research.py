@@ -52,11 +52,21 @@ def run_research(
     iteration = state.research_iteration  # Resume from saved iteration
     max_iterations = state.max_iterations
 
-    # APPROVAL GATE: Before first research run
+    # APPROVAL GATE: Before first research run (with feedback loop)
     if approval and state.research_iteration == 0:
-        if not approval.pre_research_gate(state):
-            ui.warning("Research cancelled by user")
-            return False
+        while True:
+            gate_result = approval.pre_research_gate(state)
+            if gate_result is True:
+                break
+            elif isinstance(gate_result, str):
+                from .plan import replan_with_feedback
+                if not replan_with_feedback(state, gate_result):
+                    ui.error("Re-planning failed, proceeding with existing plan")
+                    break
+                continue
+            else:
+                ui.warning("Research cancelled by user")
+                return False
 
     while iteration < max_iterations:
         iteration += 1
@@ -346,43 +356,44 @@ def _run_research_batch(
         def cb(event_type: str, name: str, data: dict):
             if event_type == "tool_use":
                 # Log tool calls with thread ID for cross-reference with table
+                # Note: avoid [brackets] around thread_id — Rich eats them as markup
                 if name == "WebSearch":
                     query = data.get("query", "")[:80]
-                    ui.verbose(f"[{thread_id}] WebSearch: {query}")
+                    ui.verbose(f"{thread_id} WebSearch: {query}")
                 elif name == "WebFetch":
                     url = data.get("url", "")[:80]
-                    ui.verbose(f"[{thread_id}] WebFetch: {url}")
+                    ui.verbose(f"{thread_id} WebFetch: {url}")
                 elif name.startswith("mcp__brave-search__"):
                     query = data.get("query", "")[:80]
-                    ui.verbose(f"[{thread_id}] BraveSearch: {query}")
+                    ui.verbose(f"{thread_id} BraveSearch: {query}")
                 elif name.startswith("mcp__exa__"):
                     query = data.get("query", "")[:80]
-                    ui.verbose(f"[{thread_id}] Exa: {query}")
+                    ui.verbose(f"{thread_id} Exa: {query}")
                 elif name.startswith("mcp__paper-search__"):
                     query = data.get("query", "")[:80]
-                    ui.verbose(f"[{thread_id}] Papers: {name.split('__')[-1]}: {query}")
+                    ui.verbose(f"{thread_id} Papers: {name.split('__')[-1]}: {query}")
                 elif name.startswith("mcp__firecrawl__"):
                     url = data.get("url", "")[:80]
-                    ui.verbose(f"[{thread_id}] Firecrawl: {url}")
+                    ui.verbose(f"{thread_id} Firecrawl: {url}")
                 elif name.startswith("mcp__crawl4ai__"):
                     url = data.get("url", "")[:80]
-                    ui.verbose(f"[{thread_id}] Crawl4AI: {url}")
+                    ui.verbose(f"{thread_id} Crawl4AI: {url}")
                 elif name.startswith("mcp__digikey__"):
                     kw = data.get("keywords", "")[:80]
-                    ui.verbose(f"[{thread_id}] DigiKey: {kw}")
+                    ui.verbose(f"{thread_id} DigiKey: {kw}")
                 elif name == "Write":
                     path = data.get("file_path", "")
                     fname = path.split("/")[-1] if "/" in path else path
-                    ui.verbose(f"[{thread_id}] Write: {fname}")
+                    ui.verbose(f"{thread_id} Write: {fname}")
                 elif name == "Read":
                     path = data.get("file_path", "")
                     fname = path.split("/")[-1] if "/" in path else path
-                    ui.verbose(f"[{thread_id}] Read: {fname}")
+                    ui.verbose(f"{thread_id} Read: {fname}")
                 else:
-                    ui.verbose(f"[{thread_id}] {name}")
+                    ui.verbose(f"{thread_id} {name}")
             elif event_type == "result":
                 cost = data.get("cost", 0)
-                ui.verbose(f"[{thread_id}] Done (${cost:.2f})")
+                ui.verbose(f"{thread_id} Done (${cost:.2f})")
         return cb
 
     # Log full agent conversations to logs/ for debugging

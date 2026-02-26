@@ -617,24 +617,36 @@ class DeepReportUI:
         width = self.console.width if self.console else 100
 
         with self._status_lock:
+            # Very narrow terminal: minimal two-column table
+            if width < 50:
+                table = Table(show_header=False, box=None)
+                table.add_column("Agent", no_wrap=True)
+                table.add_column("Status")
+                char = SPINNER_CHARS[self._spinner_frame % len(SPINNER_CHARS)]
+                self._spinner_frame += 1
+                for thread in self._threads:
+                    tid = thread["id"]
+                    status = self._thread_status.get(tid, "pending")
+                    sym = {"running": f"{char}", "complete": "✓", "failed": "✗"}.get(status, "○")
+                    table.add_row(tid, sym)
+                complete = sum(1 for s in self._thread_status.values() if s == "complete")
+                total = len(self._threads)
+                return Panel(table, title=f"{complete}/{total}")
+
             table = Table(show_header=True, box=ROUNDED)
 
-            # Width-adaptive columns
-            if width < 90:
-                table.add_column("ID", width=14, no_wrap=True)
-                table.add_column("Agent", min_width=20, max_width=35, no_wrap=True)
-                table.add_column("Status", width=16)
-                title_max = 32
-            elif width < 130:
-                table.add_column("ID", width=22, no_wrap=True)
-                table.add_column("Agent", min_width=30, max_width=55, no_wrap=True)
-                table.add_column("Status", width=20)
-                title_max = 50
-            else:
-                table.add_column("ID", width=22, no_wrap=True)
-                table.add_column("Agent", min_width=40, max_width=70, no_wrap=True)
-                table.add_column("Status", width=22)
-                title_max = 65
+            # Width-adaptive columns — fixed ID/Status, dynamic Agent
+            id_width = 14 if width < 90 else 22
+            status_width = 16 if width < 90 else (20 if width < 130 else 22)
+            overhead = 16  # borders + separators + padding
+            remaining = max(20, width - id_width - status_width - overhead)
+            agent_max = remaining
+            agent_min = min(20, agent_max)
+            title_max = max(20, remaining - 2)
+
+            table.add_column("ID", width=id_width, no_wrap=True)
+            table.add_column("Agent", min_width=agent_min, max_width=agent_max, no_wrap=True)
+            table.add_column("Status", width=status_width)
 
             char = SPINNER_CHARS[self._spinner_frame % len(SPINNER_CHARS)]
             self._spinner_frame += 1
@@ -673,9 +685,9 @@ class DeepReportUI:
 
         if len(durations_snapshot) >= 3 and complete < total:
             avg = sum(durations_snapshot) / len(durations_snapshot)
-            remaining = total - complete - failed
+            remaining_threads = total - complete - failed
             parallel = max(running, 1)
-            eta_secs = (remaining / parallel) * avg
+            eta_secs = (remaining_threads / parallel) * avg
             parts.append(f"ETA: ~{format_duration(eta_secs)}")
 
         if failed:
@@ -859,20 +871,21 @@ class DeepReportUI:
             width = self.console.width if self.console else 100
             table = Table(show_header=True, box=ROUNDED)
 
+            id_width = 14 if width < 90 else 22
+            overhead = 12  # borders + separators + padding
+            remaining = max(20, width - id_width - overhead)
+
             if width < 90:
-                table.add_column("ID", width=14, style=theme.dim)
-                table.add_column("Title", width=24)
-                title_max, obj_max = 22, 0
-            elif width < 130:
-                table.add_column("ID", width=22, style=theme.dim)
-                table.add_column("Title", width=30)
-                table.add_column("Objective", width=44)
-                title_max, obj_max = 28, 42
+                table.add_column("ID", width=id_width, style=theme.dim)
+                table.add_column("Title", width=remaining)
+                title_max, obj_max = remaining - 2, 0
             else:
-                table.add_column("ID", width=22, style=theme.dim)
-                table.add_column("Title", width=40)
-                table.add_column("Objective", width=60)
-                title_max, obj_max = 38, 58
+                title_width = max(24, int(remaining * 0.35))
+                obj_width = max(30, remaining - title_width)
+                table.add_column("ID", width=id_width, style=theme.dim)
+                table.add_column("Title", width=title_width)
+                table.add_column("Objective", width=obj_width)
+                title_max, obj_max = title_width - 2, obj_width - 2
 
             for thread in threads:
                 tid = thread.get("id", "?")
