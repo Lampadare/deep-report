@@ -18,6 +18,7 @@ def run_cleanup(state: State) -> bool:
     Returns:
         True if cleanup succeeded
     """
+    state.current_phase = 5
     state.checkpoint("cleanup_started")
 
     report_dir = Path(state.report_dir)
@@ -94,6 +95,22 @@ def _calculate_metrics(state: State, report_dir: Path) -> dict:
     else:
         metrics["papers_downloaded"] = 0
 
+    # Reference count
+    refs_file = report_dir / "refs.md"
+    if refs_file.exists():
+        try:
+            ref_count = 0
+            with open(refs_file) as f:
+                for line in f:
+                    if line.startswith("- "):
+                        ref_count += 1
+            metrics["reference_count"] = ref_count
+        except (OSError, IOError) as e:
+            ui.warning(f"Reference counting failed: {e}")
+            metrics["reference_count"] = 0
+    else:
+        metrics["reference_count"] = 0
+
     # Audio
     audio_file = report_dir / "report_audio.md"
     metrics["audio_generated"] = audio_file.exists()
@@ -130,6 +147,7 @@ def _write_summary(state: State, metrics: dict, summary_file: Path):
         f"| Follow-up Threads | {metrics['followups_completed']} completed, {metrics['followups_failed']} failed |",
         f"| Research Iterations | {metrics['research_iterations']} |",
         f"| Papers Downloaded | {metrics['papers_downloaded']} |",
+        f"| References | {metrics['reference_count']} |",
         f"| Audio Version | {'Yes' if metrics['audio_generated'] else 'No'} |",
         f"| Estimated Cost | ${metrics['estimated_cost']:.2f} |",
         "",
@@ -201,6 +219,7 @@ def _finalize_manifest(state: State, metrics: dict):
         "papers_downloaded": metrics["papers_downloaded"],
         "audio_generated": metrics["audio_generated"],
         "estimated_cost": metrics["estimated_cost"],
+        "reference_count": metrics["reference_count"],
     })
 
     try:
@@ -249,6 +268,9 @@ def _print_summary(state: State, metrics: dict, report_dir: Path):
 
     if metrics["papers_downloaded"] > 0:
         stats["Papers"] = f"{metrics['papers_downloaded']} PDFs"
+
+    if metrics["reference_count"] > 0:
+        stats["References"] = f"{metrics['reference_count']}"
 
     stats["Agent outputs"] = f"{report_dir}/full/agents/"
 
