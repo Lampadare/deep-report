@@ -245,8 +245,15 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
 
     # Merge any CC-imported servers into the candidate set (catalog-discovered
     # entries take precedence on name collisions, although discover_cc_servers
-    # excludes catalog names so this is mostly defensive).
+    # excludes catalog names so this is mostly defensive). Imported configs that
+    # name a binary we can't find on this host are noted in verbose mode — the
+    # Claude CLI would otherwise fail at spawn time with an opaque error.
     for name, cfg in cc_imports.items():
+        if isinstance(cfg, dict):
+            cmd = cfg.get("command")
+            if cmd and not shutil.which(cmd):
+                ui.verbose(f"Imported MCP '{name}' references missing binary "
+                           f"'{cmd}' — may fail at agent spawn time")
         servers.setdefault(name, cfg)
 
     if user_enabled is not None:

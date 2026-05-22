@@ -118,14 +118,27 @@ def discover_cc_servers() -> dict[str, dict]:
             return
         found[name] = cfg
 
+    def iter_servers(maybe_dict) -> list[tuple[str, dict]]:
+        """Defensive iteration over a dict-shaped value. Returns [] for any
+        non-dict (handles hand-edits like ``"mcpServers": "oops"`` or null)."""
+        if not isinstance(maybe_dict, dict):
+            return []
+        return list(maybe_dict.items())
+
     # User-scope ~/.claude.json
     claude_json = Path.home() / ".claude.json"
     if claude_json.exists():
         try:
             data = json.loads(claude_json.read_text())
-        except (OSError, json.JSONDecodeError):
+        except json.JSONDecodeError:
+            ui.warning(f"~/.claude.json is not valid JSON — skipping CC import discovery")
             data = {}
-        for name, cfg in (data.get("mcpServers") or {}).items():
+        except OSError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+
+        for name, cfg in iter_servers(data.get("mcpServers")):
             consider(name, cfg)
         # Project scope — any project whose path is the cwd or an ancestor
         try:
@@ -133,13 +146,16 @@ def discover_cc_servers() -> dict[str, dict]:
         except OSError:
             cwd = None
         if cwd is not None:
-            for raw_path, proj in (data.get("projects") or {}).items():
+            projects = data.get("projects") if isinstance(data.get("projects"), dict) else {}
+            for raw_path, proj in projects.items():
                 try:
                     proj_path = Path(raw_path).resolve()
-                except (OSError, ValueError):
+                except (OSError, ValueError, TypeError):
                     continue
                 if proj_path == cwd or cwd.is_relative_to(proj_path):
-                    for name, cfg in (proj.get("mcpServers") or {}).items():
+                    for name, cfg in iter_servers(
+                        proj.get("mcpServers") if isinstance(proj, dict) else None
+                    ):
                         consider(name, cfg)
 
     # Project-local .mcp.json
@@ -150,10 +166,15 @@ def discover_cc_servers() -> dict[str, dict]:
     if local_mcp is not None and local_mcp.exists():
         try:
             data = json.loads(local_mcp.read_text())
-            for name, cfg in (data.get("mcpServers") or {}).items():
-                consider(name, cfg)
-        except (OSError, json.JSONDecodeError):
-            pass
+        except json.JSONDecodeError:
+            ui.warning(f"{local_mcp} is not valid JSON — skipping local MCP import discovery")
+            data = {}
+        except OSError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        for name, cfg in iter_servers(data.get("mcpServers")):
+            consider(name, cfg)
 
     return found
 
@@ -180,7 +201,8 @@ def save_config(enabled: list[str], imported: Optional[dict[str, dict]] = None) 
     interrupted write can't corrupt the previously-saved selection.
 
     ``imported`` holds the full MCP config for any servers the user inherited
-    from their Claude Code setup (keyed by server name).
+    from their Claude Code setup (keyed by server name). Those configs may
+    embed plaintext API keys, so the file is chmod 0600 after the move.
     """
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload: dict = {
@@ -193,6 +215,10 @@ def save_config(enabled: list[str], imported: Optional[dict[str, dict]] = None) 
     tmp = CONFIG_PATH.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n")
     os.replace(tmp, CONFIG_PATH)
+    try:
+        CONFIG_PATH.chmod(0o600)  # imported.env may contain plaintext API keys
+    except OSError:
+        pass  # Windows / odd FS — non-fatal
     return CONFIG_PATH
 
 
@@ -216,11 +242,22 @@ def imported_servers() -> dict[str, dict]:
 
     Empty dict when there are no imports or no config. ``enabled_keys()`` still
     governs which of these the runtime actually registers.
+
+    Defensive guards:
+    - If the on-disk ``imported`` block isn't a dict (e.g. hand-edited to a list
+      or string), return an empty dict rather than crashing downstream iteration.
+    - Filter out any names now present in the catalog — a future catalog release
+      adding a server with the same name as a saved import would otherwise
+      register the user's stale import config alongside the canonical one.
     """
     cfg = load_config()
     if cfg is None:
         return {}
-    return cfg.get("imported", {}) or {}
+    raw = cfg.get("imported")
+    if not isinstance(raw, dict):
+        return {}
+    return {name: blk for name, blk in raw.items()
+            if name not in BY_KEY and isinstance(blk, dict)}
 
 
 # ──────────────────────────────────────────────────────────────────────
