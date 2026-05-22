@@ -1142,17 +1142,14 @@ def run_new_report(config: dict, ctx: OrchestratorContext) -> int:
     # Initialize state (will be saved after setup)
     state = State()
 
-    # Phase 1: Setup
+    # Phase 1: Setup. (REPORT_DIR= is emitted inside run_setup, immediately after
+    # the path is determined, so machine-mode drivers see it as the first
+    # parseable stdout line.)
     ui.phase_start(1, "Setup")
     if not run_setup(state, config):
         ui.error("Setup failed. Check the error messages above for details.")
         return 1
     ui.phase_complete(1, "Setup")
-
-    # In machine mode, emit the report dir on the first parseable stdout line so
-    # the driver (skill) can immediately find the progress file to tail.
-    if ctx.machine_mode:
-        print(f"REPORT_DIR={state.report_dir}", flush=True)
 
     # Initialize context with report directory
     ctx.init_for_report(Path(state.report_dir))
@@ -1481,6 +1478,11 @@ def resume_report(report_dir: Path, ctx: OrchestratorContext) -> int:
     if not state_file.exists():
         ui.error("No saved session found. Start a new report with: deep-report '<topic>'")
         return 1
+
+    # Skill/agent contract: drivers using --machine --resume need to know which
+    # dir we're tailing, just like a fresh run. Emitted before any other output.
+    if ctx.machine_mode:
+        print(f"REPORT_DIR={report_dir}", flush=True)
 
     ui.info(f"Resuming report from: {report_dir}")
     try:

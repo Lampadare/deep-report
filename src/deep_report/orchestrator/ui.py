@@ -271,6 +271,13 @@ class DeepReportUI:
     def header(self, title: str, subtitle: str = ""):
         """Print a styled header."""
         display_title = self._truncate(title, 80)
+        if self._machine_mode:
+            # Plain one-liner so machine-mode stdout stays parseable.
+            # Anchored grep on ^REPORT_DIR= still wins; we just remove visual noise.
+            print(f"[deep-report] {display_title}")
+            if subtitle:
+                print(f"[deep-report] mode={subtitle}")
+            return
         if RICH_AVAILABLE:
             self.console.print()
             self.console.print(Panel(
@@ -333,6 +340,9 @@ class DeepReportUI:
         icon = PHASE_ICONS.get(phase, "▶")
         self._update_title(f"deep-report: Phase {phase}/5 — {name}")
 
+        if self._machine_mode:
+            print(f"[phase {phase}/5] {name}: starting")
+            return
         if RICH_AVAILABLE:
             color = theme.phase_colors[(phase - 1) % len(theme.phase_colors)]
             self.console.print()
@@ -347,6 +357,11 @@ class DeepReportUI:
         if self._phase_start_time:
             elapsed = f" ({format_duration(time.time() - self._phase_start_time)})"
 
+        if self._machine_mode:
+            print(f"[phase {phase}/5] {name}: complete{elapsed}")
+            if phase == 5:
+                self._update_title("deep-report: Complete")
+            return
         if RICH_AVAILABLE:
             self.console.rule(style=theme.dim)
             self.console.print(f"[bold {theme.success}]✓[/] Phase {phase} ({name}) complete{elapsed}")
@@ -540,6 +555,10 @@ class DeepReportUI:
 
     def config_summary(self, config: dict):
         """Display configuration summary as a table."""
+        if self._machine_mode:
+            for key, value in config.items():
+                print(f"[config] {key}={value}")
+            return
         if RICH_AVAILABLE:
             table = Table(show_header=False, box=None, padding=(0, 2))
             table.add_column("Key", style=f"{theme.dim} {theme.accent}")

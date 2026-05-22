@@ -169,6 +169,13 @@ def run_setup(state: State, args: dict) -> bool:
 
     state.report_dir = str(report_dir)
 
+    # Skill/agent contract: emit REPORT_DIR=<path> on stdout immediately so the
+    # driver can find the progress file to tail. This is gated on machine_mode
+    # via ui._machine_mode; printed BEFORE any other UI output for this phase
+    # so an anchored grep `^REPORT_DIR=` matches reliably.
+    if getattr(ui, "_machine_mode", False):
+        print(f"REPORT_DIR={report_dir}", flush=True)
+
     # Set state file path early, before any save() or checkpoint() calls
     state._state_file = str(Path(report_dir) / "state" / "orchestrator_state.json")
 
