@@ -837,12 +837,20 @@ Examples:
     if args.resume:
         return resume_report(Path(args.resume), ctx)
 
-    # Handle --list flag
+    # Handle --list flag (rejects in machine mode — picker requires a TTY)
     if args.list:
+        if args.machine:
+            print("error: --machine is incompatible with --list (interactive picker)",
+                  file=sys.stderr)
+            return 2
         return list_and_resume(ctx)
 
-    # Handle --delete flag
+    # Handle --delete flag (rejects in machine mode — picker requires a TTY)
     if args.delete:
+        if args.machine:
+            print("error: --machine is incompatible with --delete (interactive picker)",
+                  file=sys.stderr)
+            return 2
         return delete_report()
 
     # Machine mode: strict bypass — no questionary, no AI recommendations, no prompts.
@@ -1146,8 +1154,28 @@ def run_new_report(config: dict, ctx: OrchestratorContext) -> int:
     # the path is determined, so machine-mode drivers see it as the first
     # parseable stdout line.)
     ui.phase_start(1, "Setup")
-    if not run_setup(state, config):
+    setup_ok = False
+    try:
+        setup_ok = run_setup(state, config)
+    except BaseException as e:
+        # Initialize a minimal progress writer if we have a report_dir, so the
+        # failure is observable in progress.jsonl.
+        if state.report_dir:
+            try:
+                ctx.init_for_report(Path(state.report_dir))
+                ctx.progress.report_failed(1, f"setup crashed: {e}", exit_code=1)
+            except Exception:
+                pass
+        raise
+
+    if not setup_ok:
         ui.error("Setup failed. Check the error messages above for details.")
+        if state.report_dir:
+            try:
+                ctx.init_for_report(Path(state.report_dir))
+                ctx.progress.report_failed(1, "setup returned False", exit_code=1)
+            except Exception:
+                pass
         return 1
     ui.phase_complete(1, "Setup")
 
@@ -1159,8 +1187,24 @@ def run_new_report(config: dict, ctx: OrchestratorContext) -> int:
     # Transition message
     ui.info("Setup complete — decomposing into research threads...")
 
-    # Continue with remaining phases
-    result = continue_from_phase(state, 2, ctx)
+    # Continue with remaining phases. Wrap in try/finally so machine-mode drivers
+    # tailing progress.jsonl always see a terminal event (report_ready or
+    # report_failed) regardless of crash/abort path.
+    try:
+        result = continue_from_phase(state, 2, ctx)
+    except KeyboardInterrupt:
+        if ctx.progress:
+            ctx.progress.report_failed(state.current_phase, "interrupted by user", exit_code=130)
+        raise
+    except BaseException as e:
+        if ctx.progress:
+            ctx.progress.report_failed(state.current_phase, f"crash: {e}", exit_code=1)
+        raise
+
+    if result != 0 and ctx.progress:
+        ctx.progress.report_failed(state.current_phase,
+                                   f"phase {state.current_phase} returned {result}",
+                                   exit_code=result)
 
     # Update user profile after successful report
     if result == 0:

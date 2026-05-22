@@ -7,6 +7,7 @@ Also supports legacy .log format for backwards compatibility.
 
 import fcntl
 import json
+import os
 import time
 from pathlib import Path
 from datetime import datetime
@@ -41,21 +42,30 @@ class ProgressWriter:
         return time.time() - self.start_time
 
     def _write_event(self, event_type: str, data: dict):
-        """Write a JSON-lines event with file locking."""
+        """Write a JSON-lines event atomically.
+
+        fcntl.flock is advisory (writers cooperate) but readers like `tail -F`
+        don't honor it. To prevent a reader from observing a partial line if a
+        writer crashes mid-write, we build the full line in memory and do a
+        single os.write — atomic for any size up to PIPE_BUF (typically 4 KB,
+        which our events comfortably fit within).
+        """
         event = {
             "timestamp": datetime.now().isoformat(),
             "elapsed_secs": round(self._elapsed_secs(), 2),
             "type": event_type,
             **data
         }
+        line = (json.dumps(event) + "\n").encode("utf-8")
         try:
-            with open(self.progress_file, "a") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(json.dumps(event) + "\n")
-                    f.flush()
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            fd = os.open(self.progress_file,
+                         os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                os.write(fd, line)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
         except OSError as e:
             print(f"Warning: Could not write progress: {e}")
 
