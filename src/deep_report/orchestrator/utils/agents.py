@@ -95,6 +95,28 @@ AGENT_TOOLS = {
 # Allowed model names
 ALLOWED_MODELS = ["sonnet", "opus", "haiku"]
 
+
+def extend_allowed_tools_for_imports(base: list[str]) -> list[str]:
+    """Append wildcard allow entries for any user-enabled CC-imported MCP server.
+
+    ``--allowedTools`` on Claude CLI is a strict allowlist; without these
+    entries, tools served by imported MCPs (registered in mcp.json) would be
+    silently denied at runtime. The pattern ``mcp__<server>`` allows every
+    tool exposed by that server — appropriate here because the user has
+    explicitly opted in via the wizard.
+
+    Catalog servers stay restricted to their specific tool names in
+    ``AGENT_TOOLS`` — only imports get the wildcard.
+    """
+    try:
+        from ..setup_wizard import enabled_keys, imported_servers
+        enabled = enabled_keys() or set()
+        imports = imported_servers()
+    except Exception:
+        return base
+    extras = [f"mcp__{name}" for name in imports if name in enabled]
+    return base + extras if extras else base
+
 # Docker image for crawl4ai MCP server
 _CRAWL4AI_IMAGE = "uysalsadi/crawl4ai-mcp-server:latest"
 
@@ -220,16 +242,9 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
         except (subprocess.TimeoutExpired, OSError):
             pass
 
-    if os.environ.get("DIGIKEY_CLIENT_ID"):
-        digikey_dir = Path.home() / ".local" / "share" / "digikey-mcp"
-        if digikey_dir.exists() and _cmd_exists("uv"):
-            servers["digikey"] = {
-                "command": "uv",
-                "args": [
-                    "--directory", str(digikey_dir),
-                    "run", "python", "digikey_mcp_server.py",
-                ],
-            }
+    # (Vertical MCPs like DigiKey are no longer auto-registered; users who
+    # need them should configure via Claude Code and import via the wizard.
+    # That path uses a wildcard `mcp__<name>` allow entry at spawn time.)
 
     # If the user has run `deep-report --setup`, only keep servers they enabled.
     # Otherwise (first run / no config), include everything we discovered.
@@ -245,15 +260,22 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
 
     # Merge any CC-imported servers into the candidate set (catalog-discovered
     # entries take precedence on name collisions, although discover_cc_servers
-    # excludes catalog names so this is mostly defensive). Imported configs that
-    # name a binary we can't find on this host are noted in verbose mode — the
-    # Claude CLI would otherwise fail at spawn time with an opaque error.
+    # excludes catalog names so this is mostly defensive). Each config is
+    # shape-validated: a valid MCP block is either ``{type: "http", url: ...}``
+    # or ``{command: ..., args?: [...], env?: {...}}``. Imports that don't
+    # match are skipped with a warning rather than passed verbatim to the CLI.
     for name, cfg in cc_imports.items():
-        if isinstance(cfg, dict):
-            cmd = cfg.get("command")
-            if cmd and not shutil.which(cmd):
-                ui.verbose(f"Imported MCP '{name}' references missing binary "
-                           f"'{cmd}' — may fail at agent spawn time")
+        if not isinstance(cfg, dict):
+            ui.warning(f"Imported MCP '{name}' is not a dict — skipped")
+            continue
+        is_http = cfg.get("type") == "http" and isinstance(cfg.get("url"), str)
+        is_cmd = isinstance(cfg.get("command"), str) and cfg.get("command")
+        if not (is_http or is_cmd):
+            ui.warning(f"Imported MCP '{name}' has neither HTTP url nor command — skipped")
+            continue
+        if is_cmd and not shutil.which(cfg["command"]):
+            ui.verbose(f"Imported MCP '{name}' references missing binary "
+                       f"'{cfg['command']}' — may fail at agent spawn time")
         servers.setdefault(name, cfg)
 
     if user_enabled is not None:

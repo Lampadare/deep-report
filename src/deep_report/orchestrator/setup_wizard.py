@@ -328,7 +328,7 @@ def run_wizard() -> int:
         ui.info("Run: pip install questionary")
         return 1
 
-    if not sys.stdin.isatty():
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
         ui.error("--setup needs an interactive terminal (arrow keys + space toggles).")
         ui.info(f"To pre-seed without a TTY, write {CONFIG_PATH} yourself "
                 "(see docs for schema).")

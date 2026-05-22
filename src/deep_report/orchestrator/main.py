@@ -814,6 +814,10 @@ Examples:
 
     # Handle --setup (MCP wizard) before --setup-skill since users may confuse them
     if args.setup:
+        if args.machine:
+            print("error: --setup is interactive; not compatible with --machine",
+                  file=sys.stderr)
+            return 2
         from .setup_wizard import run_wizard
         return run_wizard()
 
@@ -835,7 +839,9 @@ Examples:
     # contexts (--machine or no TTY — those fall back to env-var-only discovery).
     if not args.machine and not args.list and not args.delete and not args.resume:
         from .setup_wizard import CONFIG_PATH, run_wizard
-        if not CONFIG_PATH.exists() and sys.stdin.isatty():
+        if (not CONFIG_PATH.exists()
+                and sys.stdin.isatty()
+                and sys.stdout.isatty()):
             ui.info("")
             ui.info("First run detected — let's pick which MCP servers you want to use.")
             ui.info("(deep-report drives external search/papers/scrape MCPs to research"

@@ -191,19 +191,10 @@ CATALOG: tuple[MCPSpec, ...] = (
         cost_note="Free; requires Docker + pulled image.",
         requires_docker=True,
     ),
-    # ─── Vertical (opt-in) ────────────────────────────────────────────────
-    MCPSpec(
-        key="digikey",
-        display_name="DigiKey (hardware)",
-        category=CAT_VERTICAL,
-        tier=TIER_FREE_TIER,
-        summary="Electronic-component search and pricing.",
-        transport="uvx",
-        required_env=("DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET"),
-        key_signup_url="https://developer.digikey.com",
-        cost_note="Free DigiKey developer account.",
-        requires_uv=True,
-    ),
+    # (Vertical-domain MCPs like DigiKey are intentionally not in the catalog
+    # because research agents don't have their tool names in AGENT_TOOLS.
+    # Users who want them can configure via Claude Code and import through
+    # the wizard's CC-import path, which uses a wildcard allow entry.)
 )
 
 
