@@ -235,11 +235,20 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
     # Otherwise (first run / no config), include everything we discovered.
     # Wrapped defensively — a broken wizard module must not break agent spawning.
     try:
-        from ..setup_wizard import enabled_keys
+        from ..setup_wizard import enabled_keys, imported_servers
         user_enabled = enabled_keys()
+        cc_imports = imported_servers()
     except Exception as e:
         ui.warning(f"Could not read MCP wizard config ({e}) — including all discovered servers")
         user_enabled = None
+        cc_imports = {}
+
+    # Merge any CC-imported servers into the candidate set (catalog-discovered
+    # entries take precedence on name collisions, although discover_cc_servers
+    # excludes catalog names so this is mostly defensive).
+    for name, cfg in cc_imports.items():
+        servers.setdefault(name, cfg)
+
     if user_enabled is not None:
         skipped = [k for k in servers if k not in user_enabled]
         if skipped:
