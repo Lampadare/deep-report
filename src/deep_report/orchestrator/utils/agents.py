@@ -52,9 +52,8 @@ AGENT_TOOLS = {
         # OpenAlex — cross-discipline discovery + citation graph
         "mcp__openalex__openalex_search_entities",
         "mcp__openalex__openalex_get_citation_graph",
-        # Unpaywall — OA PDF resolution for any DOI
-        "mcp__unpaywall__unpaywall_get_by_doi",
-        "mcp__unpaywall__unpaywall_fetch_pdf_text",
+        "mcp__openalex__openalex_resolve_name",
+        # (Unpaywall not needed — cyanheads/pubmed-mcp already chains Unpaywall internally)
         # Wikipedia — universal grounding layer
         "mcp__wikipedia__search_wikipedia",
         "mcp__wikipedia__get_summary",
@@ -136,29 +135,21 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
         if os.environ.get("NCBI_API_KEY"):
             servers["pubmed"]["env"] = {"NCBI_API_KEY": os.environ["NCBI_API_KEY"]}
 
-    # OpenAlex — cross-discipline discovery + citation graph (270M works, no auth)
-    if has_npx:
+    # OpenAlex — cross-discipline discovery + citation graph (270M works).
+    # OPENALEX_API_KEY takes an email — used as the polite-pool contact.
+    openalex_contact = os.environ.get("OPENALEX_API_KEY") or os.environ.get("OPENALEX_EMAIL")
+    if has_npx and openalex_contact:
         servers["openalex"] = {
             "command": "npx",
             "args": ["-y", "@cyanheads/openalex-mcp-server"],
+            "env": {"OPENALEX_API_KEY": openalex_contact},
         }
-        if os.environ.get("OPENALEX_EMAIL"):
-            servers["openalex"]["env"] = {"OPENALEX_EMAIL": os.environ["OPENALEX_EMAIL"]}
 
     # arXiv — prefer installed console script, fall back to uvx
     if shutil.which("arxiv-mcp-server"):
         servers["arxiv"] = {"command": "arxiv-mcp-server", "args": []}
     elif _cmd_exists("uvx"):
         servers["arxiv"] = {"command": "uvx", "args": ["arxiv-mcp-server"]}
-
-    # Unpaywall — OA PDF resolution (requires email per Unpaywall policy)
-    unpaywall_email = os.environ.get("UNPAYWALL_EMAIL")
-    if has_npx and unpaywall_email:
-        servers["unpaywall"] = {
-            "command": "npx",
-            "args": ["-y", "unpaywall-mcp"],
-            "env": {"UNPAYWALL_EMAIL": unpaywall_email},
-        }
 
     # Wikipedia — universal grounding, no key
     if shutil.which("wikipedia-mcp"):
