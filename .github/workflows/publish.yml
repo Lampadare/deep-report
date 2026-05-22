@@ -1,0 +1,70 @@
+name: Publish to PyPI
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: publish-pypi
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Bump patch version
+        id: bump
+        run: |
+          new_version=$(python - <<'PY'
+          import pathlib, re, sys
+          p = pathlib.Path("pyproject.toml")
+          text = p.read_text()
+          m = re.search(r'^version = "(\d+)\.(\d+)\.(\d+)"', text, re.M)
+          if not m:
+              sys.exit("Could not parse version from pyproject.toml")
+          major, minor, patch = map(int, m.groups())
+          new = f"{major}.{minor}.{patch + 1}"
+          p.write_text(re.sub(r'^version = "[^"]+"', f'version = "{new}"', text, count=1, flags=re.M))
+          print(new)
+          PY
+          )
+          echo "version=$new_version" >> "$GITHUB_OUTPUT"
+          echo "Bumped to $new_version"
+
+      - name: Commit, tag, and push bump
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          git commit -m "Bump version to v${NEW_VERSION} [skip release]"
+          git tag "v${NEW_VERSION}"
+          git push origin main --follow-tags
+
+      - name: Build distribution
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.bump.outputs.version }}
+          generate_release_notes: true
