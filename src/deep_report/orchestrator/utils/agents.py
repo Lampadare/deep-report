@@ -6,11 +6,13 @@ Handles spawning Claude agents via CLI and collecting their outputs.
 
 import subprocess
 import json
-import sys
-import time
 import os
+import shutil
+import sys
 import threading
+import time
 from pathlib import Path
+from urllib.parse import quote as _url_quote
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Callable, TYPE_CHECKING
 from dataclasses import dataclass
@@ -128,12 +130,12 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
         }
 
     # Tavily — agent-optimized search via remote HTTP endpoint (free tier: 1k credits/mo).
-    # No Node required — same pattern as Exa.
+    # No Node required — same pattern as Exa. Keys are URL-encoded so special chars survive.
     tavily_key = os.environ.get("TAVILY_API_KEY")
     if tavily_key:
         servers["tavily"] = {
             "type": "http",
-            "url": f"https://mcp.tavily.com/mcp/?tavilyApiKey={tavily_key}",
+            "url": f"https://mcp.tavily.com/mcp/?tavilyApiKey={_url_quote(tavily_key, safe='')}",
         }
 
     # Exa uses HTTP transport with API key passed as query parameter
@@ -141,11 +143,10 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
     if exa_key:
         servers["exa"] = {
             "type": "http",
-            "url": f"https://mcp.exa.ai/mcp?exaApiKey={exa_key}",
+            "url": f"https://mcp.exa.ai/mcp?exaApiKey={_url_quote(exa_key, safe='')}",
         }
 
     # Academic stack — replaces the abandoned paper-search-mcp (broken bioRxiv/medRxiv/PubMed bits)
-    import shutil
 
     # PubMed + Europe PMC + bioRxiv/medRxiv via cyanheads/pubmed-mcp-server
     if has_npx:
@@ -157,13 +158,23 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
             servers["pubmed"]["env"] = {"NCBI_API_KEY": os.environ["NCBI_API_KEY"]}
 
     # OpenAlex — cross-discipline discovery + citation graph (270M works).
-    # OPENALEX_API_KEY takes an email — used as the polite-pool contact.
-    openalex_contact = os.environ.get("OPENALEX_API_KEY") or os.environ.get("OPENALEX_EMAIL")
-    if has_npx and openalex_contact:
+    # The cyanheads server requires OPENALEX_API_KEY at startup (the value is just an
+    # email used for the polite-pool). We pass an anonymous sentinel when the user
+    # hasn't configured one — OpenAlex still works, just demoted from the polite pool.
+    if has_npx:
+        openalex_contact = (
+            os.environ.get("OPENALEX_API_KEY")
+            or os.environ.get("OPENALEX_EMAIL")
+            or "deep-report-anonymous@example.com"
+        )
         servers["openalex"] = {
             "command": "npx",
             "args": ["-y", "@cyanheads/openalex-mcp-server"],
-            "env": {"OPENALEX_API_KEY": openalex_contact},
+            # Set both env names — the upstream server has used either across versions.
+            "env": {
+                "OPENALEX_API_KEY": openalex_contact,
+                "OPENALEX_EMAIL": openalex_contact,
+            },
         }
 
     # arXiv — prefer installed console script, fall back to uvx
@@ -222,20 +233,26 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
 
     # If the user has run `deep-report --setup`, only keep servers they enabled.
     # Otherwise (first run / no config), include everything we discovered.
-    from ..setup_wizard import enabled_keys
-    user_enabled = enabled_keys()
+    # Wrapped defensively — a broken wizard module must not break agent spawning.
+    try:
+        from ..setup_wizard import enabled_keys
+        user_enabled = enabled_keys()
+    except Exception as e:
+        ui.warning(f"Could not read MCP wizard config ({e}) — including all discovered servers")
+        user_enabled = None
     if user_enabled is not None:
         skipped = [k for k in servers if k not in user_enabled]
         if skipped:
             ui.verbose(f"Skipping disabled MCPs per ~/.deep-report/mcp_config.json: {skipped}")
         servers = {k: v for k, v in servers.items() if k in user_enabled}
 
-    # Require at least one search provider (web or academic)
+    # Require at least one search backend. Context7 is library-docs, not a search
+    # provider — excluded. Crawl4ai/Playwright are fetchers, also excluded.
     has_search = any(
         k in servers
         for k in (
             "brave-search", "exa", "firecrawl", "tavily",
-            "pubmed", "openalex", "arxiv", "wikipedia", "context7",
+            "pubmed", "openalex", "arxiv", "wikipedia",
         )
     )
     if not has_search:
@@ -249,6 +266,11 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
         state_dir.mkdir(parents=True, exist_ok=True)
         config_path = state_dir / "mcp.json"
         config_path.write_text(json.dumps(config, indent=2))
+        # mcp.json embeds plaintext API keys — keep it user-readable only.
+        try:
+            config_path.chmod(0o600)
+        except OSError:
+            pass  # Windows / odd FS — non-fatal
         return config_path
     except OSError as e:
         ui.warning(f"Failed to write MCP config: {e} — falling back to WebSearch/WebFetch")

@@ -128,9 +128,10 @@ CATALOG: tuple[MCPSpec, ...] = (
         tier=TIER_FREE,
         summary="270M scholarly works + citation graph, all disciplines.",
         transport="npx",
-        required_env=("OPENALEX_API_KEY",),
+        # No required env — runtime falls back to an anonymous polite-pool sentinel.
+        optional_env=("OPENALEX_API_KEY", "OPENALEX_EMAIL"),
         key_signup_url="https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication#the-polite-pool",
-        cost_note="Free. 'API key' is your email — used for polite-pool routing.",
+        cost_note="Free. Setting OPENALEX_EMAIL with your own email upgrades to polite pool (faster).",
         requires_node=True,
         default_enabled=True,
     ),
