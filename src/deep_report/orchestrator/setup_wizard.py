@@ -90,27 +90,41 @@ def load_config() -> Optional[dict]:
         return None
     try:
         return json.loads(CONFIG_PATH.read_text())
-    except (OSError, json.JSONDecodeError):
+    except json.JSONDecodeError:
+        ui.warning(f"MCP config at {CONFIG_PATH} is not valid JSON — re-run `deep-report --setup`")
+        return None
+    except OSError:
         return None
 
 
 def save_config(enabled: list[str]) -> Path:
+    """Atomically save the user's MCP selection. Uses temp + os.replace so an
+    interrupted write can't corrupt the previously-saved selection."""
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": 1,
         "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "enabled": sorted(enabled),
     }
-    CONFIG_PATH.write_text(json.dumps(payload, indent=2) + "\n")
+    tmp = CONFIG_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n")
+    os.replace(tmp, CONFIG_PATH)
     return CONFIG_PATH
 
 
 def enabled_keys() -> Optional[set[str]]:
-    """Return the user's enabled set, or None if no config has been saved."""
+    """Return the user's enabled set, or None if no config has been saved.
+
+    Treats a config without an ``enabled`` key as unconfigured (returns None +
+    warns) rather than silently disabling every server.
+    """
     cfg = load_config()
     if cfg is None:
         return None
-    return set(cfg.get("enabled", []))
+    if "enabled" not in cfg:
+        ui.warning(f"MCP config at {CONFIG_PATH} has no 'enabled' key — re-run `deep-report --setup`")
+        return None
+    return set(cfg["enabled"])
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -178,6 +192,12 @@ def run_wizard() -> int:
         ui.error("questionary is not installed — required for the setup wizard.")
         ui.info("Run: pip install questionary")
         return 1
+
+    if not sys.stdin.isatty():
+        ui.error("--setup needs an interactive terminal (arrow keys + space toggles).")
+        ui.info(f"To pre-seed without a TTY, write {CONFIG_PATH} yourself "
+                "(see docs for schema).")
+        return 2
 
     ui.header("deep-report MCP setup")
     ui.info(
