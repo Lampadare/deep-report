@@ -30,6 +30,7 @@ Options:
 """
 
 import argparse
+import os
 import re
 import shutil
 import signal
@@ -1038,37 +1039,76 @@ def _handle_approve_subcommand(args) -> int:
     """Write an approval response to state/pending_approval.json.
 
     The running --machine CLI polls this file; writing a `response` block releases the gate.
+
+    Hardened against:
+      - empty/whitespace gate or report_dir
+      - path traversal (--report-dir resolved + sanity-checked for state/manifest.json)
+      - racing --approve invocations (fcntl.flock around read+write)
+      - re-approval of an already-resolved gate (status checked under the lock)
+      - partial reads (atomic publish via os.replace)
     """
-    if not args.report_dir or not args.gate:
+    import fcntl
+    from json import loads, dumps, JSONDecodeError
+
+    if not args.report_dir or not args.gate or not args.gate.strip():
         print("error: --approve requires --report-dir and --gate", file=sys.stderr)
         return 2
 
-    approval_file = Path(args.report_dir) / "state" / "pending_approval.json"
+    # Resolve and sanity-check the report dir. We require manifest.json — it's
+    # written by setup.py for every report, so its presence is a cheap
+    # "yes this is actually a deep-report report dir" check that blocks
+    # path-traversal targets like /etc/passwd.
+    report_dir = Path(args.report_dir).expanduser().resolve()
+    manifest = report_dir / "state" / "manifest.json"
+    if not manifest.exists():
+        print(f"error: not a deep-report directory (no manifest.json at {manifest})",
+              file=sys.stderr)
+        return 2
+
+    approval_file = report_dir / "state" / "pending_approval.json"
     if not approval_file.exists():
         print(f"error: no pending approval at {approval_file}", file=sys.stderr)
         return 2
 
+    # Lock + read + validate + write atomically. Two racing --approve calls will
+    # serialize on the lock; the second sees status="responded" and exits.
     try:
-        from json import loads, dumps
-        request = loads(approval_file.read_text())
-    except Exception as e:
-        print(f"error: could not read approval file: {e}", file=sys.stderr)
-        return 2
+        with open(approval_file, "r+") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                try:
+                    request = loads(f.read())
+                except JSONDecodeError as e:
+                    print(f"error: could not parse approval file: {e}",
+                          file=sys.stderr)
+                    return 2
 
-    if request.get("gate_id") != args.gate:
-        print(f"error: gate mismatch — file has '{request.get('gate_id')}', "
-              f"got '{args.gate}'", file=sys.stderr)
-        return 2
+                if request.get("gate_id") != args.gate:
+                    print(f"error: gate mismatch — file has "
+                          f"'{request.get('gate_id')}', got '{args.gate}'",
+                          file=sys.stderr)
+                    return 2
 
-    request["response"] = {
-        "decision": args.decision,
-        "feedback": args.feedback or "",
-        "responded_at": datetime.now().isoformat(),
-    }
-    request["status"] = "responded"
-    try:
-        approval_file.write_text(dumps(request, indent=2))
-    except Exception as e:
+                if request.get("status") in ("responded", "resolved"):
+                    print(f"error: gate '{args.gate}' is no longer pending "
+                          f"(status={request.get('status')})", file=sys.stderr)
+                    return 2
+
+                request["response"] = {
+                    "decision": args.decision,
+                    "feedback": args.feedback or "",
+                    "responded_at": datetime.now().isoformat(),
+                }
+                request["status"] = "responded"
+
+                # Atomic publish so the polling worker never reads a partial line.
+                tmp = approval_file.with_suffix(".tmp")
+                tmp.write_text(dumps(request, indent=2))
+                os.replace(tmp, approval_file)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except OSError as e:
         print(f"error: could not write approval response: {e}", file=sys.stderr)
         return 1
 

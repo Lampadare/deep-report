@@ -73,3 +73,46 @@ def test_file_mode_timeout(tmp_path):
         allow_feedback=False, poll_secs=0.05, timeout_secs=0.2,
     )
     assert result is False
+    # Timeout must emit a distinct approval_timeout event so drivers can
+    # tell timeout from rejection.
+    events = [json.loads(line) for line in
+              (tmp_path / "state" / "progress.jsonl").read_text().splitlines()]
+    assert any(e["type"] == "approval_timeout" for e in events)
+
+
+def test_file_mode_stale_response_from_prior_gate_is_ignored(tmp_path):
+    """A response left over with status=resolved from an earlier gate must
+    not be silently consumed by a new request."""
+    gate = _make_gate(tmp_path, mode="file")
+
+    # Pre-seed a "resolved" file as if a prior gate finished
+    approval_file = tmp_path / "state" / "pending_approval.json"
+    approval_file.parent.mkdir(parents=True, exist_ok=True)
+    approval_file.write_text(json.dumps({
+        "gate_id": "old_gate",
+        "request_seq": 99,
+        "status": "resolved",
+        "response": {"decision": "approve", "feedback": ""},
+    }))
+
+    # New gate must NOT consume the stale response — it should time out quickly
+    result = gate._wait_for_file_response(
+        "new_gate", {}, "proceed_or_quit",
+        allow_feedback=False, poll_secs=0.05, timeout_secs=0.3,
+    )
+    assert result is False  # timeout, not stale approval
+
+
+def test_file_mode_request_write_failure_returns_false(tmp_path, monkeypatch):
+    """When the request file cannot be written, fail closed (don't auto-approve)."""
+    gate = _make_gate(tmp_path, mode="file")
+
+    def boom(*a, **kw):
+        raise OSError("disk full")
+    monkeypatch.setattr(gate, "_atomic_write_json", boom)
+
+    result = gate._wait_for_file_response(
+        "pre_research", {}, "proceed_or_quit",
+        allow_feedback=False, poll_secs=0.05, timeout_secs=0.5,
+    )
+    assert result is False  # fail closed, NOT True

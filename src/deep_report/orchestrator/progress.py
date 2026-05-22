@@ -192,3 +192,20 @@ class ProgressWriter:
             "exit_code": exit_code,
         })
         self._write_legacy(f"Phase 5 | REPORT READY | exit={exit_code} | {report_path}")
+
+    def report_failed(self, phase: int, reason: str, exit_code: int = 1):
+        """Mark the report as terminally failed. Mirror of report_ready for crash paths."""
+        self._write_event("report_failed", {
+            "phase": phase,
+            "reason": reason,
+            "exit_code": exit_code,
+        })
+        self._write_legacy(f"Phase {phase} | REPORT FAILED | exit={exit_code} | {reason}")
+
+    def approval_timeout(self, gate_id: str, timeout_secs: float):
+        """Distinct event for a gate that timed out (vs user-issued reject/stop_early)."""
+        self._write_event("approval_timeout", {
+            "gate_id": gate_id,
+            "timeout_secs": timeout_secs,
+        })
+        self._write_legacy(f"Phase 0 | APPROVAL TIMEOUT | {gate_id} | {timeout_secs:.0f}s")

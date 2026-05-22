@@ -6,10 +6,18 @@ CRITICAL: Only shows metadata, NEVER reads research content.
 """
 
 import json
+import os
 import queue
+from itertools import count
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+
+
+class _GateRejected(Exception):
+    """Caller asked to reject the current request (not approve, not stop_early).
+    Distinct from the False return value so iteration_gate can react differently
+    from a user-issued stop_early."""
 
 try:
     from rich.box import ROUNDED
@@ -62,6 +70,9 @@ class ApprovalGate:
         self.approval_file = self.report_dir / "state" / "pending_approval.json"
         self.progress = progress
         self.approval_mode = approval_mode
+        # Monotonic counter so the poll loop only accepts responses tagged to
+        # the current request (prevents stale-response replay across iterations).
+        self._request_seq = count(1)
 
     # Gate types control which options are shown
     GATE_PROCEED_OR_QUIT = "proceed_or_quit"      # Enter=proceed, q=quit
@@ -758,46 +769,118 @@ class ApprovalGate:
                 })
             return "approve"
 
+    def _atomic_write_json(self, payload: dict):
+        """Write JSON atomically: temp file + os.replace.
+
+        Prevents readers from seeing a partial file mid-write. Raises if the
+        write fails; callers MUST handle that — silently swallowing a failed
+        approval write turns into a silent auto-approve of a paid gate.
+        """
+        self.approval_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.approval_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2))
+        os.replace(tmp, self.approval_file)
+
     def _wait_for_file_response(self, gate_id: str, metadata: dict,
                                 gate_type: str, allow_feedback: bool,
                                 poll_secs: float = 2.0,
                                 timeout_secs: float = 3600.0) -> bool | str:
         """Write a pending approval request and poll for a response block.
 
-        The driver (a Claude Code skill, or a human running `deep-report --approve`)
-        writes a `response` field into the file: {"decision": "approve"|"reject"|"stop_early",
-        "feedback": "..."}. We see it on the next poll and return.
+        Protocol:
+          - Worker writes a request with `gate_id`, `request_seq` (monotonic),
+            `status="pending"`, and an empty/absent `response`. Atomic publish.
+          - Driver (skill or `deep-report --approve`) writes a `response` block
+            into the same file with matching `gate_id` and `request_seq`.
+          - Worker's poll only accepts responses whose `gate_id` AND `request_seq`
+            match the current request AND whose `status != "resolved"`.
 
-        Returns the same shape as the stdin path:
-          True = approved (proceed)
-          False = stopped early / rejected
+        Returns:
+          True = approved
+          False = stopped early
           str = feedback text (only when allow_feedback)
+          On timeout: emits a distinct approval_timeout event and returns False.
         """
         import time
 
+        seq = next(self._request_seq)
         request = {
             "gate_id": gate_id,
+            "request_seq": seq,
             "metadata": metadata,
             "gate_type": gate_type,
             "allow_feedback": allow_feedback,
             "status": "pending",
             "requested_at": datetime.now().isoformat(),
+            "response": None,  # explicit null — never inherit a prior gate's response
         }
         try:
-            self.approval_file.parent.mkdir(parents=True, exist_ok=True)
-            self.approval_file.write_text(json.dumps(request, indent=2))
+            self._atomic_write_json(request)
         except Exception as e:
-            ui.warning(f"Could not write approval request: {e}")
-            return True  # Fail open — don't deadlock on filesystem error
+            # Could not serialize the request — do NOT auto-approve. An interactive
+            # gate that cannot publish its request must fail closed.
+            ui.error(f"Could not write approval request for gate '{gate_id}': {e}")
+            if self.progress:
+                self.progress.error(0, f"approval gate '{gate_id}' could not be written: {e}")
+                self.progress.approval_received(gate_id, False)
+            return False
 
         if self.progress:
             self.progress.approval_waiting(gate_id)
 
+        try:
+            return self._poll_for_response(
+                gate_id, seq, allow_feedback, poll_secs, timeout_secs
+            )
+        except KeyboardInterrupt:
+            # Persist a clear terminal state so the file isn't left "pending" forever.
+            try:
+                current = json.loads(self.approval_file.read_text())
+                current["status"] = "interrupted"
+                current["responded_at"] = datetime.now().isoformat()
+                self._atomic_write_json(current)
+            except Exception:
+                pass
+            if self.progress:
+                self.progress.approval_received(gate_id, False)
+            raise
+
+    def _poll_for_response(self, gate_id: str, request_seq: int,
+                           allow_feedback: bool, poll_secs: float,
+                           timeout_secs: float) -> bool | str:
+        """Inner poll loop. Extracted so KeyboardInterrupt handling is clean."""
+        import time
+
         deadline = time.monotonic() + timeout_secs
+        consecutive_missing = 0
         while time.monotonic() < deadline:
             try:
                 current = json.loads(self.approval_file.read_text())
-            except Exception:
+            except FileNotFoundError:
+                # File was deleted (e.g., user wiped state). Surface clearly
+                # after a few consecutive misses to avoid log spam on transient
+                # races; recreating the request is the driver's responsibility.
+                consecutive_missing += 1
+                if consecutive_missing == 3:
+                    ui.warning(
+                        f"Approval file missing for gate '{gate_id}'; waiting…"
+                    )
+                time.sleep(poll_secs)
+                continue
+            except json.JSONDecodeError:
+                # Mid-write race or tampered file — wait for the next tick.
+                time.sleep(poll_secs)
+                continue
+            consecutive_missing = 0
+
+            # Defensive checks: only accept responses bound to THIS request.
+            if current.get("gate_id") != gate_id:
+                time.sleep(poll_secs)
+                continue
+            if current.get("request_seq") != request_seq:
+                time.sleep(poll_secs)
+                continue
+            if current.get("status") == "resolved":
                 time.sleep(poll_secs)
                 continue
 
@@ -809,10 +892,10 @@ class ApprovalGate:
                 if self.progress:
                     self.progress.approval_received(gate_id, approved)
 
-                # Persist final state
+                # Mark resolved so a stale read can't re-trigger us.
                 current["status"] = "resolved"
                 try:
-                    self.approval_file.write_text(json.dumps(current, indent=2))
+                    self._atomic_write_json(current)
                 except Exception:
                     pass
 
@@ -824,8 +907,11 @@ class ApprovalGate:
 
             time.sleep(poll_secs)
 
+        # Timeout — distinct from rejection. Emit a dedicated event so the
+        # driver can tell "user walked away" from "user said no".
         ui.error(f"Approval gate '{gate_id}' timed out after {timeout_secs:.0f}s")
         if self.progress:
+            self.progress.approval_timeout(gate_id, timeout_secs)
             self.progress.approval_received(gate_id, False)
         return False
 
