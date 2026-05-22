@@ -41,6 +41,10 @@ def main():
     if "--install-skill" in sys.argv:
         sys.argv[sys.argv.index("--install-skill")] = "--setup-skill"
 
+    # Treat bare "help" / "h" / "?" as --help so they don't get parsed as a topic
+    if len(sys.argv) >= 2 and sys.argv[1] in ("help", "h", "?"):
+        sys.argv[1] = "--help"
+
     if "--version" in sys.argv:
         from . import __version__
         print(f"deep-report {__version__}")
