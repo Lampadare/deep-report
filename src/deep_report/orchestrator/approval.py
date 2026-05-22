@@ -46,11 +46,22 @@ class ApprovalGate:
     """
 
     def __init__(self, report_dir: Path, interactive: bool = False,
-                 progress: Optional[ProgressWriter] = None):
+                 progress: Optional[ProgressWriter] = None,
+                 approval_mode: str = "stdin"):
+        """
+        Args:
+            approval_mode: How to gather the user's decision.
+                "stdin" — block on console.input() (default, current behavior)
+                "file"  — write request to pending_approval.json and poll for a `response`
+                          block. Used by --machine --interactive.
+                "auto"  — short-circuit to approved without writing or asking. Used by
+                          --machine alone and any non-interactive run.
+        """
         self.report_dir = Path(report_dir)
         self.interactive = interactive
         self.approval_file = self.report_dir / "state" / "pending_approval.json"
         self.progress = progress
+        self.approval_mode = approval_mode
 
     # Gate types control which options are shown
     GATE_PROCEED_OR_QUIT = "proceed_or_quit"      # Enter=proceed, q=quit
@@ -70,8 +81,13 @@ class ApprovalGate:
         Returns:
             True if approved, False if stopped early, or str with feedback text
         """
-        if not self.interactive:
+        if self.approval_mode == "auto" or not self.interactive:
             return True  # Auto-approve in non-interactive mode
+
+        if self.approval_mode == "file":
+            return self._wait_for_file_response(
+                gate_id, metadata, gate_type, allow_feedback
+            )
 
         # Write approval request to file
         request = {
@@ -317,6 +333,31 @@ class ApprovalGate:
         coverage = decision.get("coverage")
         gate_id = f"iteration_{iteration + 1}"
         requested_at = datetime.now().isoformat()
+
+        # Machine-mode driven approval: skip the keyboard TUI, poll the file instead.
+        # Approve = take all suggestions with default model. Stop_early = no follow-ups.
+        if self.approval_mode == "file":
+            metadata = {
+                "iteration": iteration + 1,
+                "sufficient": sufficient,
+                "research_meta": research_meta,
+                "suggestions": [
+                    {"type": r["type"], "text": r["text"]} for r in rows
+                ],
+                "coverage": coverage,
+            }
+            result = self._wait_for_file_response(
+                gate_id, metadata,
+                gate_type=self.GATE_PROCEED_STOP_QUIT,
+                allow_feedback=False,
+            )
+            if result is False:
+                return False  # stop_early
+            # Approve all suggestions with default model
+            decision["gaps_with_model"] = [(r["text"], r["model"]) for r in rows if r["type"] == "gap"]
+            decision["conflicts_with_model"] = [(r["text"], r["model"]) for r in rows if r["type"] == "conflict"]
+            decision["deepen_with_model"] = [(r["text"], r["model"]) for r in rows if r["type"] == "deepen"]
+            return True
 
         if self.progress:
             self.progress.approval_waiting(gate_id)
@@ -716,6 +757,77 @@ class ApprovalGate:
                     "model": default_model,
                 })
             return "approve"
+
+    def _wait_for_file_response(self, gate_id: str, metadata: dict,
+                                gate_type: str, allow_feedback: bool,
+                                poll_secs: float = 2.0,
+                                timeout_secs: float = 3600.0) -> bool | str:
+        """Write a pending approval request and poll for a response block.
+
+        The driver (a Claude Code skill, or a human running `deep-report --approve`)
+        writes a `response` field into the file: {"decision": "approve"|"reject"|"stop_early",
+        "feedback": "..."}. We see it on the next poll and return.
+
+        Returns the same shape as the stdin path:
+          True = approved (proceed)
+          False = stopped early / rejected
+          str = feedback text (only when allow_feedback)
+        """
+        import time
+
+        request = {
+            "gate_id": gate_id,
+            "metadata": metadata,
+            "gate_type": gate_type,
+            "allow_feedback": allow_feedback,
+            "status": "pending",
+            "requested_at": datetime.now().isoformat(),
+        }
+        try:
+            self.approval_file.parent.mkdir(parents=True, exist_ok=True)
+            self.approval_file.write_text(json.dumps(request, indent=2))
+        except Exception as e:
+            ui.warning(f"Could not write approval request: {e}")
+            return True  # Fail open — don't deadlock on filesystem error
+
+        if self.progress:
+            self.progress.approval_waiting(gate_id)
+
+        deadline = time.monotonic() + timeout_secs
+        while time.monotonic() < deadline:
+            try:
+                current = json.loads(self.approval_file.read_text())
+            except Exception:
+                time.sleep(poll_secs)
+                continue
+
+            response = current.get("response")
+            if response:
+                decision = response.get("decision", "approve")
+                feedback = response.get("feedback", "")
+                approved = decision == "approve"
+                if self.progress:
+                    self.progress.approval_received(gate_id, approved)
+
+                # Persist final state
+                current["status"] = "resolved"
+                try:
+                    self.approval_file.write_text(json.dumps(current, indent=2))
+                except Exception:
+                    pass
+
+                if allow_feedback and feedback:
+                    return feedback
+                if decision == "stop_early":
+                    return False
+                return approved
+
+            time.sleep(poll_secs)
+
+        ui.error(f"Approval gate '{gate_id}' timed out after {timeout_secs:.0f}s")
+        if self.progress:
+            self.progress.approval_received(gate_id, False)
+        return False
 
     def _save_gate_status(self, gate_id: str, status: str,
                           requested_at: str = None):

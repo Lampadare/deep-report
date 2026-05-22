@@ -34,6 +34,7 @@ import re
 import shutil
 import signal
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -695,9 +696,11 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
 # Global context for phases
 class OrchestratorContext:
     """Shared context across all phases."""
-    def __init__(self, interactive: bool = False, verbose: bool = False):
+    def __init__(self, interactive: bool = False, verbose: bool = False,
+                 machine_mode: bool = False):
         self.interactive = interactive
         self.verbose = verbose
+        self.machine_mode = machine_mode
         self.progress: Optional[ProgressWriter] = None
         self.approval: Optional[ApprovalGate] = None
         self.intervention: Optional[InterventionHandler] = None
@@ -705,7 +708,19 @@ class OrchestratorContext:
     def init_for_report(self, report_dir: Path):
         """Initialize context objects for a report."""
         self.progress = ProgressWriter(report_dir)
-        self.approval = ApprovalGate(report_dir, self.interactive, self.progress)
+        # Approval mode:
+        #   --machine + --interactive → "file" (poll pending_approval.json)
+        #   --machine alone            → "auto" (skip gates, like non-interactive)
+        #   default                    → "stdin" if interactive else "auto"
+        if self.machine_mode and self.interactive:
+            approval_mode = "file"
+        elif self.interactive:
+            approval_mode = "stdin"
+        else:
+            approval_mode = "auto"
+        self.approval = ApprovalGate(
+            report_dir, self.interactive, self.progress, approval_mode=approval_mode
+        )
         self.intervention = InterventionHandler(report_dir, self.progress, self.interactive)
         # Set verbose mode on global UI
         ui.set_verbose(self.verbose)
@@ -770,6 +785,20 @@ Examples:
                         help="Install Claude Code skill for /deep-report command")
     parser.add_argument("--intro", action="store_true",
                         help="Show onboarding guide and example usage")
+    parser.add_argument("--machine", action="store_true",
+                        help="Run as silent file-coordinated worker for skills/agents. "
+                             "No Rich Live, no questionary, no input(). State flows through "
+                             "state/progress.jsonl and state/pending_approval.json.")
+    parser.add_argument("--name", default=None,
+                        help="Short name for report folder/headers. "
+                             "Required in --machine mode when topic > 100 chars.")
+    # Approval subcommand: deep-report --approve --report-dir <dir> --gate <id>
+    parser.add_argument("--approve", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--report-dir", help=argparse.SUPPRESS)
+    parser.add_argument("--gate", help=argparse.SUPPRESS)
+    parser.add_argument("--decision", choices=["approve", "reject", "stop_early"],
+                        default="approve", help=argparse.SUPPRESS)
+    parser.add_argument("--feedback", default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
@@ -785,8 +814,20 @@ Examples:
     if args.intro:
         return show_intro()
 
+    # Handle --approve subcommand: write approval response and exit
+    if args.approve:
+        return _handle_approve_subcommand(args)
+
+    # Machine mode: silent worker. Activate before any UI calls.
+    if args.machine:
+        ui.set_machine_mode(True)
+
     # Create context
-    ctx = OrchestratorContext(interactive=args.interactive, verbose=args.verbose)
+    ctx = OrchestratorContext(
+        interactive=args.interactive,
+        verbose=args.verbose,
+        machine_mode=args.machine,
+    )
 
     # Handle resume case
     if args.resume:
@@ -799,6 +840,19 @@ Examples:
     # Handle --delete flag
     if args.delete:
         return delete_report()
+
+    # Machine mode: strict bypass — no questionary, no AI recommendations, no prompts.
+    # Validate inputs and run with flag-derived config.
+    if args.machine:
+        if not args.topic:
+            print("error: --machine requires a topic", file=sys.stderr)
+            return 2
+        if len(args.topic) > 100 and not args.name:
+            print("error: --machine requires --name when topic is over 100 chars",
+                  file=sys.stderr)
+            return 2
+        config = _build_machine_config(args)
+        return run_new_report(config, ctx)
 
     # If no topic, check for unfinished reports to resume
     if not args.topic:
@@ -937,6 +991,88 @@ Examples:
 
 
 
+def _build_machine_config(args) -> dict:
+    """Build a run config from flags only — no prompts, no AI recommendations.
+
+    Used by --machine to skip questionary, the AI topic analyzer, and any input() fallback.
+    Defaults mirror --quick's hardcoded values; the AI recommendation layer is skipped on
+    purpose to keep the run deterministic and fast for agent drivers.
+    """
+    topic = args.topic
+    brief = ""
+    # Long-topic handling: --name supplies the short form, full topic becomes the brief.
+    if args.name:
+        brief = topic
+        topic = args.name
+
+    # Parse seed refs (same logic as --quick path)
+    seed_urls = []
+    seed_folder = None
+    if args.refs:
+        if args.refs.startswith("http"):
+            seed_urls = [u.strip() for u in args.refs.split(",")]
+        elif Path(args.refs).is_dir():
+            seed_folder = args.refs
+
+    return {
+        "topic": topic,
+        "brief": brief,
+        "model": args.model or "sonnet",
+        "agent_count": args.agents if args.agents is not None else 10,
+        "seed_urls": seed_urls,
+        "seed_refs_folder": seed_folder,
+        "download_papers": args.download_papers,
+        "generate_audio": args.audio,
+        "expertise_level": args.expertise or "intermediate",
+        "report_type": args.report_type or "deep-dive",
+        "report_dir": args.output,
+        "cwd": args.cwd,
+        "interactive": args.interactive,
+    }
+
+
+def _handle_approve_subcommand(args) -> int:
+    """Write an approval response to state/pending_approval.json.
+
+    The running --machine CLI polls this file; writing a `response` block releases the gate.
+    """
+    if not args.report_dir or not args.gate:
+        print("error: --approve requires --report-dir and --gate", file=sys.stderr)
+        return 2
+
+    approval_file = Path(args.report_dir) / "state" / "pending_approval.json"
+    if not approval_file.exists():
+        print(f"error: no pending approval at {approval_file}", file=sys.stderr)
+        return 2
+
+    try:
+        from json import loads, dumps
+        request = loads(approval_file.read_text())
+    except Exception as e:
+        print(f"error: could not read approval file: {e}", file=sys.stderr)
+        return 2
+
+    if request.get("gate_id") != args.gate:
+        print(f"error: gate mismatch — file has '{request.get('gate_id')}', "
+              f"got '{args.gate}'", file=sys.stderr)
+        return 2
+
+    request["response"] = {
+        "decision": args.decision,
+        "feedback": args.feedback or "",
+        "responded_at": datetime.now().isoformat(),
+    }
+    request["status"] = "responded"
+    try:
+        approval_file.write_text(dumps(request, indent=2))
+    except Exception as e:
+        print(f"error: could not write approval response: {e}", file=sys.stderr)
+        return 1
+
+    print(f"approval {args.decision} written for gate '{args.gate}'")
+    return 0
+
+
 def _check_auth():
     """Probe Claude CLI auth. Warns on failure, never blocks."""
     from ..cli import check_claude_auth
@@ -969,6 +1105,11 @@ def run_new_report(config: dict, ctx: OrchestratorContext) -> int:
         ui.error("Setup failed. Check the error messages above for details.")
         return 1
     ui.phase_complete(1, "Setup")
+
+    # In machine mode, emit the report dir on the first parseable stdout line so
+    # the driver (skill) can immediately find the progress file to tail.
+    if ctx.machine_mode:
+        print(f"REPORT_DIR={state.report_dir}", flush=True)
 
     # Initialize context with report directory
     ctx.init_for_report(Path(state.report_dir))
@@ -1507,6 +1648,12 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
             "Iterations": state.research_iteration,
         }
     )
+
+    # Single "we're done" event for any agent tailing progress.jsonl
+    if ctx.progress:
+        report_path = str(Path(state.report_dir) / "report.md")
+        summary_path = str(Path(state.report_dir) / "SUMMARY.md")
+        ctx.progress.report_ready(report_path, summary_path, exit_code=0)
 
     return 0
 

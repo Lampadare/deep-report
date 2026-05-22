@@ -93,6 +93,10 @@ class DeepReportUI:
         self._live = None
         self._task_id = None
         self._verbose = False
+        # Machine mode: silent file-coordinated worker for skill/agent drivers.
+        # No Rich Live displays, no questionary, no input(). State flows
+        # through state/progress.jsonl and state/pending_approval.json.
+        self._machine_mode = False
         # Plain mode progress tracking
         self._plain_total = 0
         self._plain_completed = 0
@@ -179,6 +183,17 @@ class DeepReportUI:
         self._verbose = enabled
         if enabled and was_off:
             self._replay_log_buffer()
+
+    def set_machine_mode(self, enabled: bool):
+        """Enable machine mode: suppress Rich Live displays, ANSI escapes.
+
+        Plain stdout still works (header/step/info/phase_start/complete go to stdout
+        line-by-line). Structured state lives in state/progress.jsonl.
+        """
+        self._machine_mode = enabled
+        if enabled and RICH_AVAILABLE and self.console is not None:
+            # Force plain output: no color, no styled spinners, no TTY-detected truncation.
+            self.console = Console(force_terminal=False, no_color=True, highlight=False)
 
     @property
     def verbose_enabled(self) -> bool:
@@ -388,7 +403,7 @@ class DeepReportUI:
 
     def start_session(self):
         """Start persistent session Live display with footer bar."""
-        if not RICH_AVAILABLE:
+        if not RICH_AVAILABLE or self._machine_mode:
             return
         if self._footer_live:
             return
@@ -543,6 +558,10 @@ class DeepReportUI:
     @contextmanager
     def show_loading(self, message: str):
         """Show animated spinner during loading."""
+        if self._machine_mode:
+            print(f"  -> {message}")
+            yield
+            return
         if RICH_AVAILABLE and self._footer_live:
             spinner = Spinner("dots", text=f"[{theme.accent}]{message}[/]")
             self._active_content = lambda: spinner
@@ -560,6 +579,11 @@ class DeepReportUI:
 
     def agent_progress_start(self, total: int, description: str = "Spawning agents"):
         """Start agent progress tracking with enhanced visuals."""
+        if self._machine_mode:
+            print(f"{description} (0/{total})...")
+            self._plain_total = total
+            self._plain_completed = 0
+            return
         if RICH_AVAILABLE:
             try:
                 self._progress = Progress(
@@ -616,6 +640,10 @@ class DeepReportUI:
     @contextmanager
     def spinner_task(self, message: str):
         """Show spinner during a single long task."""
+        if self._machine_mode:
+            print(f"  {message}...")
+            yield
+            return
         if RICH_AVAILABLE and self._footer_live:
             spinner = Spinner("dots", text=f"[{theme.accent}]{message}[/]")
             self._active_content = lambda: spinner
@@ -643,7 +671,7 @@ class DeepReportUI:
         self._research_title = title
         self._research_start_time = time.monotonic()
 
-        if not RICH_AVAILABLE:
+        if not RICH_AVAILABLE or self._machine_mode:
             print(f"\n{title}")
             return
 

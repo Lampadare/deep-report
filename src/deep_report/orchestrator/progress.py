@@ -183,3 +183,12 @@ class ProgressWriter:
         for key, value in stats.items():
             self._write_legacy(f"Phase 5 |   {key} | {value}")
         self._write_legacy(f"{'='*60}")
+
+    def report_ready(self, report_path: str, summary_path: str, exit_code: int = 0):
+        """Mark the report as fully done. Single 'we're finished' event for agents tailing the log."""
+        self._write_event("report_ready", {
+            "report_path": report_path,
+            "summary_path": summary_path,
+            "exit_code": exit_code,
+        })
+        self._write_legacy(f"Phase 5 | REPORT READY | exit={exit_code} | {report_path}")
