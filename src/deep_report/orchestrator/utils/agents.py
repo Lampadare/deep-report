@@ -39,11 +39,26 @@ AGENT_TOOLS = {
         "mcp__exa__company_research_exa",
         "mcp__brave-search__brave_web_search",
         "mcp__brave-search__brave_news_search",
-        # Academic papers (only working tools)
-        "mcp__paper-search__search_arxiv",
-        "mcp__paper-search__search_pubmed",
-        "mcp__paper-search__read_arxiv_paper",
-        "mcp__paper-search__read_medrxiv_paper",
+        # Academic papers — arXiv (replaces paper-search.arxiv)
+        "mcp__arxiv__search_papers",
+        "mcp__arxiv__read_paper",
+        "mcp__arxiv__download_paper",
+        # Academic papers — PubMed + Europe PMC (replaces paper-search.{pubmed,biorxiv,medrxiv})
+        "mcp__pubmed__pubmed_search_articles",
+        "mcp__pubmed__pubmed_fetch_articles",
+        "mcp__pubmed__pubmed_fetch_fulltext",
+        "mcp__pubmed__pubmed_europepmc_search",
+        "mcp__pubmed__pubmed_find_related",
+        # OpenAlex — cross-discipline discovery + citation graph
+        "mcp__openalex__openalex_search_entities",
+        "mcp__openalex__openalex_get_citation_graph",
+        # Unpaywall — OA PDF resolution for any DOI
+        "mcp__unpaywall__unpaywall_get_by_doi",
+        "mcp__unpaywall__unpaywall_fetch_pdf_text",
+        # Wikipedia — universal grounding layer
+        "mcp__wikipedia__search_wikipedia",
+        "mcp__wikipedia__get_summary",
+        "mcp__wikipedia__get_article",
         # Page fetching
         "mcp__firecrawl__firecrawl_scrape",
         "mcp__crawl4ai__scrape",
@@ -109,16 +124,47 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
             "url": f"https://mcp.exa.ai/mcp?exaApiKey={exa_key}",
         }
 
-    # paper-search: check if the python module is installed
-    try:
-        import importlib.util
-        if importlib.util.find_spec("paper_search_mcp"):
-            servers["paper-search"] = {
-                "command": sys.executable,
-                "args": ["-m", "paper_search_mcp.server"],
-            }
-    except (ImportError, ValueError):
-        pass
+    # Academic stack — replaces the abandoned paper-search-mcp (broken bioRxiv/medRxiv/PubMed bits)
+    import shutil
+
+    # PubMed + Europe PMC + bioRxiv/medRxiv via cyanheads/pubmed-mcp-server
+    if has_npx:
+        servers["pubmed"] = {
+            "command": "npx",
+            "args": ["-y", "@cyanheads/pubmed-mcp-server"],
+        }
+        if os.environ.get("NCBI_API_KEY"):
+            servers["pubmed"]["env"] = {"NCBI_API_KEY": os.environ["NCBI_API_KEY"]}
+
+    # OpenAlex — cross-discipline discovery + citation graph (270M works, no auth)
+    if has_npx:
+        servers["openalex"] = {
+            "command": "npx",
+            "args": ["-y", "@cyanheads/openalex-mcp-server"],
+        }
+        if os.environ.get("OPENALEX_EMAIL"):
+            servers["openalex"]["env"] = {"OPENALEX_EMAIL": os.environ["OPENALEX_EMAIL"]}
+
+    # arXiv — prefer installed console script, fall back to uvx
+    if shutil.which("arxiv-mcp-server"):
+        servers["arxiv"] = {"command": "arxiv-mcp-server", "args": []}
+    elif _cmd_exists("uvx"):
+        servers["arxiv"] = {"command": "uvx", "args": ["arxiv-mcp-server"]}
+
+    # Unpaywall — OA PDF resolution (requires email per Unpaywall policy)
+    unpaywall_email = os.environ.get("UNPAYWALL_EMAIL")
+    if has_npx and unpaywall_email:
+        servers["unpaywall"] = {
+            "command": "npx",
+            "args": ["-y", "unpaywall-mcp"],
+            "env": {"UNPAYWALL_EMAIL": unpaywall_email},
+        }
+
+    # Wikipedia — universal grounding, no key
+    if shutil.which("wikipedia-mcp"):
+        servers["wikipedia"] = {"command": "wikipedia-mcp", "args": []}
+    elif _cmd_exists("uvx"):
+        servers["wikipedia"] = {"command": "uvx", "args": ["wikipedia-mcp"]}
 
     # crawl4ai via docker — only if docker + image are available (skip if not pulled)
     if _cmd_exists("docker"):
@@ -148,7 +194,11 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
 
     # Require at least one search provider (web or academic)
     has_search = any(
-        k in servers for k in ("brave-search", "exa", "firecrawl", "paper-search")
+        k in servers
+        for k in (
+            "brave-search", "exa", "firecrawl",
+            "pubmed", "openalex", "arxiv", "wikipedia",
+        )
     )
     if not has_search:
         if servers:

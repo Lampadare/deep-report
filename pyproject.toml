@@ -16,6 +16,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Pull in the Python-installable academic MCP servers as console scripts.
+# Node-based MCPs (Brave, Firecrawl, Tavily, cyanheads/*) install on demand via `npx -y`.
+research = [
+    "arxiv-mcp-server>=0.5.0",
+    "wikipedia-mcp>=2.0.1",
+]
+# Heavier vertical MCPs for domain-specific reports
+vertical = [
+    "deep-report[research]",
+    "sec-edgar-mcp>=1.0.8",
+    "patent-mcp-server>=0.9.5",
+]
+all = ["deep-report[vertical]"]
 dev = ["pytest", "ruff"]
 
 [project.scripts]
