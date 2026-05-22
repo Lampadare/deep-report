@@ -39,6 +39,13 @@ AGENT_TOOLS = {
         "mcp__exa__company_research_exa",
         "mcp__brave-search__brave_web_search",
         "mcp__brave-search__brave_news_search",
+        "mcp__tavily__tavily_search",
+        "mcp__tavily__tavily_extract",
+        "mcp__tavily__tavily_crawl",
+        "mcp__tavily__tavily_map",
+        # Library / API docs (universal benefit for any tech topic)
+        "mcp__context7__resolve-library-id",
+        "mcp__context7__query-docs",
         # Academic papers — arXiv (replaces paper-search.arxiv)
         "mcp__arxiv__search_papers",
         "mcp__arxiv__read_paper",
@@ -61,6 +68,11 @@ AGENT_TOOLS = {
         # Page fetching
         "mcp__firecrawl__firecrawl_scrape",
         "mcp__crawl4ai__scrape",
+        # Playwright fallback — for JS-heavy / anti-bot pages (restricted subset)
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_wait_for",
+        "mcp__playwright__browser_close",
     ],
     "research_fallback": [
         "Read", "Glob", "Grep", "Write", "WebSearch", "WebFetch",
@@ -115,6 +127,14 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
             "env": {"FIRECRAWL_API_KEY": os.environ["FIRECRAWL_API_KEY"]},
         }
 
+    # Tavily — agent-optimized search + extract (free tier: 1k credits/month)
+    if has_npx and os.environ.get("TAVILY_API_KEY"):
+        servers["tavily"] = {
+            "command": "npx",
+            "args": ["-y", "tavily-mcp"],
+            "env": {"TAVILY_API_KEY": os.environ["TAVILY_API_KEY"]},
+        }
+
     # Exa uses HTTP transport with API key passed as query parameter
     exa_key = os.environ.get("EXA_API_KEY")
     if exa_key:
@@ -157,6 +177,22 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
     elif _cmd_exists("uvx"):
         servers["wikipedia"] = {"command": "uvx", "args": ["wikipedia-mcp"]}
 
+    # Context7 — version-pinned library/API docs. Works keyless; key raises rate limits.
+    if has_npx:
+        servers["context7"] = {
+            "command": "npx",
+            "args": ["-y", "@upstash/context7-mcp"],
+        }
+        if os.environ.get("CONTEXT7_API_KEY"):
+            servers["context7"]["env"] = {"CONTEXT7_API_KEY": os.environ["CONTEXT7_API_KEY"]}
+
+    # Playwright (Microsoft) — JS-heavy / anti-bot scrape fallback. Accessibility-tree based.
+    if has_npx:
+        servers["playwright"] = {
+            "command": "npx",
+            "args": ["-y", "@playwright/mcp@latest"],
+        }
+
     # crawl4ai via docker — only if docker + image are available (skip if not pulled)
     if _cmd_exists("docker"):
         try:
@@ -187,8 +223,8 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
     has_search = any(
         k in servers
         for k in (
-            "brave-search", "exa", "firecrawl",
-            "pubmed", "openalex", "arxiv", "wikipedia",
+            "brave-search", "exa", "firecrawl", "tavily",
+            "pubmed", "openalex", "arxiv", "wikipedia", "context7",
         )
     )
     if not has_search:
