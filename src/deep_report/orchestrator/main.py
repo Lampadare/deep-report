@@ -741,6 +741,9 @@ Examples:
   # Pre-fill interview with specific values
   deep-report "Quantum computing" --agents 15 --model opus
 
+  # Machine mode - silent worker for skills/agents, state in progress.jsonl
+  deep-report "Quantum computing" --machine --name quantum-computing
+
   # Resume interrupted report
   deep-report --resume ~/reports/quantum_20260207_1430
         """
