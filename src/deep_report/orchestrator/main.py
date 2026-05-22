@@ -1415,21 +1415,31 @@ Claude agents in parallel, each investigating a different aspect of your topic.
 
 ---
 
-## Getting Started
+## Getting Started — Plug and Play
 
-The simplest way to start:
+The whole tool is built around one command:
 
-    deep-report "your research topic"
+    deep-report "any topic you want a deep report on"
 
-That's it! An **interactive interview** will walk you through all the options:
-- How many research agents to use
-- Which model (Sonnet or Opus)
-- Target expertise level
-- Report type (AI suggests formats tailored to your topic)
-- Whether to add seed references
+That's it. The interactive interview walks you through everything — number of
+agents, model, expertise level, report type (AI suggests formats tailored to
+your topic), and whether you want to add seed references. If you don't know
+which flags to use, **don't use any** — the interview is the main interface.
 
-**All flags are optional** - the interview covers everything. Use `--quick` only
-if you want to skip the interview and use sensible defaults.
+Want to skip the interview on repeat runs? Add `--quick`.
+
+---
+
+## First Time Running?
+
+On your first run you'll be walked through a one-time **MCP setup picker** —
+a checkbox UI for choosing which search engines, paper databases, and scraping
+tools deep-report should use. Nothing is pre-selected; pick what you want.
+
+If you already have MCP servers configured in **Claude Code**
+(`~/.claude.json`), the wizard offers to import them — no re-entering keys.
+
+Re-run any time with `deep-report --setup`.
 
 ---
 
@@ -1512,12 +1522,13 @@ your-topic_20260209_1430/
 - Reports auto-save and can be resumed with `--list`
 - Press **'v'** during execution to toggle verbose mode
 - Typical report takes 15-45 minutes depending on settings
+- Re-pick MCP servers any time with `deep-report --setup`
 
 ---
 
 Ready? Just run:
 
-    deep-report "your topic here"
+    deep-report "any topic you want a deep report on"
 
 """
 
