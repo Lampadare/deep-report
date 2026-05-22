@@ -240,10 +240,12 @@ def _render_choice(spec: MCPSpec, runnable: bool, missing_reason: str) -> "Choic
     title = f"{spec.display_name}  [{badge}]  — {spec.summary}"
     if not runnable:
         title += f"   ({missing_reason})"
+    # Nothing is pre-checked. The caller flips `checked` on re-runs to restore
+    # the user's previous selection — first-run users opt in explicitly.
     return Choice(
         title=title,
         value=spec.key,
-        checked=spec.default_enabled and runnable,
+        checked=False,
         disabled=missing_reason if not runnable else False,
     )
 
@@ -297,8 +299,8 @@ def run_wizard() -> int:
 
     ui.header("deep-report MCP setup")
     ui.info(
-        "Pick the MCP servers you want to enable. Defaults are sensible for\n"
-        "first-time users. You can re-run this wizard any time."
+        "Pick the MCP servers you want deep-report to use.\n"
+        "Nothing is pre-selected — tick (Space) what you want, then Enter."
     )
 
     # Prereqs
@@ -346,9 +348,8 @@ def run_wizard() -> int:
         choices.append(questionary.Separator("\n── Imported from Claude Code ──"))
         for name, cfg in sorted(cc_imports.items()):
             label = f"{name}  [IMPORTED]  — {_summarize_cc_entry(cfg)}"
-            # Default-on for first-time runs (user already trusts these in CC).
-            # Otherwise honour the previously-saved selection.
-            check = name in existing if existing is not None else True
+            # Nothing pre-checked — user opts in (matches catalog-row behaviour).
+            check = name in existing if existing is not None else False
             choices.append(Choice(title=label, value=name, checked=check))
 
     selection: Optional[list[str]] = questionary.checkbox(

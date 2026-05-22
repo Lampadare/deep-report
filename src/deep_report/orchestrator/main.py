@@ -829,6 +829,24 @@ Examples:
     if args.approve:
         return _handle_approve_subcommand(args)
 
+    # First-run onboarding: if the user has never configured MCPs, walk them
+    # through the wizard before kicking off a report. Skip silently for machine
+    # mode (no TTY) and the read-only --list flag (no MCPs needed for picker).
+    if not args.machine and not args.list:
+        from .setup_wizard import CONFIG_PATH, run_wizard
+        if not CONFIG_PATH.exists() and sys.stdin.isatty():
+            ui.info("")
+            ui.info("First run detected — let's pick which MCP servers you want to use.")
+            ui.info("(deep-report drives external search/papers/scrape MCPs to research"
+                    " your topic. Nothing is pre-selected; you choose what's on.)")
+            ui.info("Run `deep-report --setup` any time to change this.")
+            ui.info("")
+            rc = run_wizard()
+            if rc != 0:
+                ui.warning("Setup did not complete — continuing with built-in"
+                           " WebSearch/WebFetch fallback only.")
+                ui.info("Run `deep-report --setup` later to configure.")
+
     # Machine mode: silent worker. Activate before any UI calls.
     if args.machine:
         ui.set_machine_mode(True)
