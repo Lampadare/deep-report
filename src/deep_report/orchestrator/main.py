@@ -785,6 +785,8 @@ Examples:
                         help="Show per-agent progress, timing, retries, and error details")
     parser.add_argument("--update", action="store_true",
                         help="Update deep-report to latest version from GitHub")
+    parser.add_argument("--setup", action="store_true",
+                        help="Run the interactive MCP setup wizard (pick which servers to enable, see API key costs)")
     parser.add_argument("--setup-skill", action="store_true",
                         help="Install Claude Code skill for /deep-report command")
     parser.add_argument("--intro", action="store_true",
@@ -809,6 +811,11 @@ Examples:
     # Handle --update flag first
     if args.update:
         return update_cli()
+
+    # Handle --setup (MCP wizard) before --setup-skill since users may confuse them
+    if args.setup:
+        from .setup_wizard import run_wizard
+        return run_wizard()
 
     # Handle --setup-skill flag
     if args.setup_skill:

@@ -220,6 +220,16 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
                 ],
             }
 
+    # If the user has run `deep-report --setup`, only keep servers they enabled.
+    # Otherwise (first run / no config), include everything we discovered.
+    from ..setup_wizard import enabled_keys
+    user_enabled = enabled_keys()
+    if user_enabled is not None:
+        skipped = [k for k in servers if k not in user_enabled]
+        if skipped:
+            ui.verbose(f"Skipping disabled MCPs per ~/.deep-report/mcp_config.json: {skipped}")
+        servers = {k: v for k, v in servers.items() if k in user_enabled}
+
     # Require at least one search provider (web or academic)
     has_search = any(
         k in servers
