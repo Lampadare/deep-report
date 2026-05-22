@@ -902,6 +902,7 @@ Examples:
             "report_type": effective_report_type,
             "report_dir": args.output,
             "cwd": args.cwd,
+            "interactive": args.interactive,
         }
         return run_new_report(config, ctx)
 
@@ -927,8 +928,9 @@ Examples:
         return 130
     if config is None:
         return 1
-    # Extract interactive flag from config
+    # Extract interactive flag from config and persist it for resume
     interactive = config.pop("_interactive", False)
+    config["interactive"] = interactive
     ctx = OrchestratorContext(interactive=interactive, verbose=args.verbose)
     return run_new_report(config, ctx)
 
@@ -1307,6 +1309,9 @@ def resume_report(report_dir: Path, ctx: OrchestratorContext) -> int:
         ui.error(f"Could not read state file: {e}")
         return 1
 
+    # Restore interactive mode from persisted state (CLI --interactive also works)
+    ctx.interactive = ctx.interactive or getattr(state, 'interactive', False)
+
     # Initialize context
     ctx.init_for_report(report_dir)
 
@@ -1374,6 +1379,7 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
 
     verbose_toggle = VerboseToggle(on_toggle=on_verbose_toggle)
     verbose_toggle.start()
+    ui.attach_verbose_toggle(verbose_toggle)
 
     phases = [
         (1, "Setup", lambda s: True),  # Already done if start_phase > 1

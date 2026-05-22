@@ -42,6 +42,9 @@ htmlcov/
 # Claude Code
 .claude/
 
+# Global state symlink
+.global-state
+
 # OS
 .DS_Store
 Thumbs.db

@@ -25,6 +25,7 @@ def run_plan(state: State) -> bool:
     Returns:
         True if planning succeeded, False otherwise
     """
+    state.current_phase = 2
     state.checkpoint("plan_started")
 
     report_dir = Path(state.report_dir)
@@ -48,7 +49,6 @@ def run_plan(state: State) -> bool:
 
     state.threads = plan["threads"]
     state.estimated_cost = plan["estimated_cost"]
-    state.plan_written = True
     state.save()
 
     # Display plan as Rich Tree
@@ -84,7 +84,7 @@ def run_plan(state: State) -> bool:
     if gaps:
         ui.info(f"Potential gaps: {', '.join(gaps[:3])}")
 
-    # Write plan to file
+    # Write plan to file (must happen BEFORE marking plan_written)
     plan_file = report_dir / "state" / "plan.md"
     try:
         _write_plan_file(state, plan, plan_file)
@@ -92,6 +92,7 @@ def run_plan(state: State) -> bool:
         ui.error(f"Failed to write plan file: {e}")
         return False
 
+    state.plan_written = True
     state.checkpoint("plan_written")
     state.mark_phase_complete(2)
 

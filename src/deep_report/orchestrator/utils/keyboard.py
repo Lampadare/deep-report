@@ -175,3 +175,17 @@ class VerboseToggle:
         if self._listener:
             self._listener.stop()
             self._listener = None
+
+    def pause(self):
+        """Temporarily stop listening so something else can own the TTY.
+
+        Restores termios to canonical mode and lets stdin reads behave normally.
+        Pair with resume(). Safe to call when not started.
+        """
+        if self._listener:
+            self._listener.stop()
+
+    def resume(self):
+        """Resume listening after a pause()."""
+        if self._listener and not self._listener._started:
+            self._listener.start()

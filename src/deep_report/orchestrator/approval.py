@@ -6,21 +6,27 @@ CRITICAL: Only shows metadata, NEVER reads research content.
 """
 
 import json
+import queue
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
 try:
-    from rich.console import Console
+    from rich.box import ROUNDED
+    from rich.console import Console, Group
+    from rich.live import Live
     from rich.panel import Panel
     from rich.table import Table
+    from rich.text import Text
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
+    ROUNDED = None
 
 from .progress import ProgressWriter
 from .ui import ui
 from .utils import RoleEnforcer
+from .utils.keyboard import KeyboardListener
 
 
 class ApprovalGate:
@@ -85,123 +91,126 @@ class ApprovalGate:
 
         is_iteration = gate_type == self.GATE_PROCEED_STOP_QUIT
 
-        # Display to user with Rich if available
-        while True:
-            if RICH_AVAILABLE:
-                console = Console()
-                console.print()
+        # Display to user with Rich if available. input_mode() stops the
+        # persistent footer Live + verbose keyboard listener so console.input()
+        # actually receives the user's keystrokes.
+        with ui.input_mode():
+            while True:
+                if RICH_AVAILABLE:
+                    console = Console()
+                    console.print()
 
-                # Build metadata table
-                table = Table(show_header=False, box=None, padding=(0, 2))
-                table.add_column("Key", style="dim cyan")
-                table.add_column("Value", style="white")
+                    # Build metadata table
+                    table = Table(show_header=False, box=None, padding=(0, 2))
+                    table.add_column("Key", style="dim cyan")
+                    table.add_column("Value", style="white")
 
-                for key, value in metadata.items():
-                    if isinstance(value, list):
-                        if value:
-                            value = "\n".join(f"• {v}" for v in value)
-                        else:
-                            value = "(none)"
-                    elif isinstance(value, dict):
-                        value = json.dumps(value, indent=2)
-                    key_display = key.replace("_", " ").title()
-                    table.add_row(key_display, str(value))
+                    for key, value in metadata.items():
+                        if isinstance(value, list):
+                            if value:
+                                value = "\n".join(f"• {v}" for v in value)
+                            else:
+                                value = "(none)"
+                        elif isinstance(value, dict):
+                            value = json.dumps(value, indent=2)
+                        key_display = key.replace("_", " ").title()
+                        table.add_row(key_display, str(value))
 
-                console.print(Panel(
-                    table,
-                    title=f"[bold yellow]⏸ APPROVAL REQUIRED[/]",
-                    subtitle=f"[dim]{gate_id}[/]",
-                    border_style="yellow",
-                    padding=(1, 2)
-                ))
+                    console.print(Panel(
+                        table,
+                        title=f"[bold yellow]⏸ APPROVAL REQUIRED[/]",
+                        subtitle=f"[dim]{gate_id}[/]",
+                        border_style="yellow",
+                        padding=(1, 2)
+                    ))
 
-                console.print()
-                console.print("  [green]Enter[/]  Proceed")
-                if allow_feedback:
-                    console.print("  [cyan]f[/]      Provide feedback to revise the plan")
-                if is_iteration:
-                    console.print("  [yellow]s[/]      Stop researching, synthesize now")
-                console.print("  [red]q[/]      Quit (progress saved, resume later)")
-                console.print()
-
-                try:
-                    opts = "[Enter"
+                    console.print()
+                    console.print("  [green]Enter[/]  Proceed")
                     if allow_feedback:
-                        opts += "/f"
+                        console.print("  [cyan]f[/]      Provide feedback to revise the plan")
                     if is_iteration:
-                        opts += "/s"
-                    opts += "/q]: "
-                    prompt = f"[bold]Proceed?[/] {opts}"
-                    response = console.input(prompt).strip().lower()
-                except EOFError:
-                    ui.warning("No interactive input available — rejecting for safety")
-                    response = 'q'
-            else:
-                print(f"\n{'='*60}")
-                print(f"APPROVAL REQUIRED: {gate_id}")
-                print(f"{'='*60}")
-                for key, value in metadata.items():
-                    if isinstance(value, (list, dict)):
-                        value = json.dumps(value, indent=2)
-                    print(f"  {key}: {value}")
-                print(f"{'='*60}")
-                print()
-                print("  [Enter]  Proceed")
-                if allow_feedback:
-                    print("  [f]      Provide feedback to revise the plan")
-                if is_iteration:
-                    print("  [s]      Stop researching, synthesize now")
-                print("  [q]      Quit (progress saved, resume later)")
-                print()
+                        console.print("  [yellow]s[/]      Stop researching, synthesize now")
+                    console.print("  [red]q[/]      Quit (progress saved, resume later)")
+                    console.print()
 
-                try:
-                    opts = "[Enter"
-                    if allow_feedback:
-                        opts += "/f"
-                    if is_iteration:
-                        opts += "/s"
-                    opts += "/q]: "
-                    prompt = f"Proceed? {opts}"
-                    response = input(prompt).strip().lower()
-                except EOFError:
-                    ui.warning("No interactive input available — rejecting for safety")
-                    response = 'q'
-
-            if response == 'q':
-                break
-            elif response == 'f' and allow_feedback:
-                # Prompt for feedback text
-                try:
-                    if RICH_AVAILABLE:
-                        feedback = Console().input("[bold]Feedback:[/] ").strip()
-                    else:
-                        feedback = input("Feedback: ").strip()
-                except EOFError:
-                    feedback = ""
-                if feedback:
-                    request["status"] = "feedback"
-                    request["feedback"] = feedback
-                    request["responded_at"] = datetime.now().isoformat()
                     try:
-                        self.approval_file.write_text(json.dumps(request, indent=2))
-                    except Exception:
-                        pass
-                    return feedback
-                ui.warning("Empty feedback, try again")
-                continue
-            elif response in ('s',) and is_iteration:
-                break
-            elif response == '':
-                break
-            else:
-                opts = "Enter (proceed)"
-                if allow_feedback:
-                    opts += ", f (feedback)"
-                if is_iteration:
-                    opts += ", s (stop & synthesize)"
-                opts += ", q (quit)"
-                ui.warning(f"Unrecognized input '{response}'. Options: {opts}")
-                continue
+                        opts = "[Enter"
+                        if allow_feedback:
+                            opts += "/f"
+                        if is_iteration:
+                            opts += "/s"
+                        opts += "/q]: "
+                        prompt = f"[bold]Proceed?[/] {opts}"
+                        response = console.input(prompt).strip().lower()
+                    except EOFError:
+                        ui.warning("No interactive input available — rejecting for safety")
+                        response = 'q'
+                else:
+                    print(f"\n{'='*60}")
+                    print(f"APPROVAL REQUIRED: {gate_id}")
+                    print(f"{'='*60}")
+                    for key, value in metadata.items():
+                        if isinstance(value, (list, dict)):
+                            value = json.dumps(value, indent=2)
+                        print(f"  {key}: {value}")
+                    print(f"{'='*60}")
+                    print()
+                    print("  [Enter]  Proceed")
+                    if allow_feedback:
+                        print("  [f]      Provide feedback to revise the plan")
+                    if is_iteration:
+                        print("  [s]      Stop researching, synthesize now")
+                    print("  [q]      Quit (progress saved, resume later)")
+                    print()
+
+                    try:
+                        opts = "[Enter"
+                        if allow_feedback:
+                            opts += "/f"
+                        if is_iteration:
+                            opts += "/s"
+                        opts += "/q]: "
+                        prompt = f"Proceed? {opts}"
+                        response = input(prompt).strip().lower()
+                    except EOFError:
+                        ui.warning("No interactive input available — rejecting for safety")
+                        response = 'q'
+
+                if response == 'q':
+                    break
+                elif response == 'f' and allow_feedback:
+                    # Prompt for feedback text
+                    try:
+                        if RICH_AVAILABLE:
+                            feedback = Console().input("[bold]Feedback:[/] ").strip()
+                        else:
+                            feedback = input("Feedback: ").strip()
+                    except EOFError:
+                        feedback = ""
+                    if feedback:
+                        request["status"] = "feedback"
+                        request["feedback"] = feedback
+                        request["responded_at"] = datetime.now().isoformat()
+                        try:
+                            self.approval_file.write_text(json.dumps(request, indent=2))
+                        except Exception:
+                            pass
+                        return feedback
+                    ui.warning("Empty feedback, try again")
+                    continue
+                elif response in ('s',) and is_iteration:
+                    break
+                elif response == '':
+                    break
+                else:
+                    opts = "Enter (proceed)"
+                    if allow_feedback:
+                        opts += ", f (feedback)"
+                    if is_iteration:
+                        opts += ", s (stop & synthesize)"
+                    opts += ", q (quit)"
+                    ui.warning(f"Unrecognized input '{response}'. Options: {opts}")
+                    continue
 
         if response == 'q':
             request["status"] = "quit"
@@ -283,29 +292,27 @@ class ApprovalGate:
     def iteration_gate(self, state, decision: dict, iteration: int) -> bool:
         """Approval gate before starting a new iteration.
 
-        Shows coverage scores, numbered suggestions, and lets the user:
-        - Enter: approve all suggestions
-        - Comma-separated numbers: select specific suggestions
-        - +text: add custom direction (combinable with numbers)
-        - s: stop & synthesize
-        - q: quit
+        Renders a navigable table TUI of proposed follow-ups. Per row the user
+        can toggle approve/deny and pick sonnet/opus. Confirming mutates the
+        `decision` dict to keep only approved suggestions and adds parallel
+        `*_with_model` lists that `_create_followups` uses.
 
-        Mutates decision dict in-place to filter gaps/conflicts/deepen
-        based on user selection.
+        Returns True to proceed (with or without follow-ups), False to stop
+        researching and proceed straight to synthesis. Raises KeyboardInterrupt
+        on quit.
         """
-        if not self.interactive:
-            return True
-
         research_meta = self.get_research_metadata(state)
+        sufficient = decision.pop("_sufficient", False)
 
-        # Build numbered suggestion list
-        suggestions = []
+        # Build initial row state
+        default_model = getattr(state, "research_model", "sonnet") or "sonnet"
+        rows = []
         for gap in decision.get("gaps", []):
-            suggestions.append(("gap", gap))
+            rows.append({"type": "gap", "text": gap, "approved": True, "model": default_model})
         for conflict in decision.get("conflicts", []):
-            suggestions.append(("conflict", conflict))
+            rows.append({"type": "conflict", "text": conflict, "approved": True, "model": default_model})
         for area in decision.get("deepen", []):
-            suggestions.append(("deepen", area))
+            rows.append({"type": "deepen", "text": area, "approved": True, "model": default_model})
 
         coverage = decision.get("coverage")
         gate_id = f"iteration_{iteration + 1}"
@@ -317,139 +324,361 @@ class ApprovalGate:
         # Write pending status immediately (so crash during input leaves a trace)
         self._save_gate_status(gate_id, "pending", requested_at)
 
-        while True:
-            if RICH_AVAILABLE:
-                console = Console()
-                console.print()
+        # Drive the TUI inside input_mode so the footer Live + verbose listener
+        # don't fight us for the terminal.
+        with ui.input_mode():
+            action = self._run_iteration_tui(
+                rows=rows,
+                coverage=coverage,
+                decision=decision,
+                research_meta=research_meta,
+                iteration=iteration,
+                sufficient=sufficient,
+                gate_id=gate_id,
+                default_model=default_model,
+            )
 
-                # Coverage table
-                if coverage and isinstance(coverage, dict):
-                    cov_table = Table(show_header=True, box=None, padding=(0, 1))
-                    cov_table.add_column("Area", style="white", min_width=20)
-                    cov_table.add_column("Score", justify="center", width=7)
-                    cov_table.add_column("Status", style="dim")
-                    for area, info in coverage.items():
-                        if not isinstance(info, dict):
-                            continue
-                        score = info.get("score", 0)
-                        note = info.get("note", "")
-                        if score >= 80:
-                            ss = "bold green"
-                        elif score >= 50:
-                            ss = "bold yellow"
-                        else:
-                            ss = "bold red"
-                        cov_table.add_row(area, f"[{ss}]{score}%[/]", str(note))
-                    console.print(cov_table)
-                    console.print()
+        if action == "quit":
+            self._save_gate_status(gate_id, "quit", requested_at)
+            if self.progress:
+                self.progress.approval_received(gate_id, False)
+            raise KeyboardInterrupt("User quit at approval gate")
 
-                # Research stats
-                stats = Table(show_header=False, box=None, padding=(0, 2))
-                stats.add_column("Key", style="dim cyan")
-                stats.add_column("Value", style="white")
-                stats.add_row("Iteration", str(iteration))
-                stats.add_row("Completed Agents", str(research_meta.get("completed_agents", 0)))
-                stats.add_row("Total Words", str(research_meta.get("total_research_words", 0)))
-                if decision.get("estimated_additional_cost"):
-                    stats.add_row("Est. Additional Cost", decision["estimated_additional_cost"])
-                console.print(stats)
-                console.print()
+        if action == "stop":
+            self._save_gate_status(gate_id, "stopped_early", requested_at)
+            if self.progress:
+                self.progress.approval_received(gate_id, False)
+            return False
 
-                # Reasoning
-                console.print(f"[bold]Reasoning:[/] {decision.get('reasoning', 'N/A')[:200]}")
-                console.print()
+        # action == "approve": mutate decision to keep only approved rows.
+        new_gaps, new_conflicts, new_deepen = [], [], []
+        gaps_wm, conflicts_wm, deepen_wm = [], [], []
+        for row in rows:
+            if not row["approved"]:
+                continue
+            entry = {"focus": row["text"], "model": row["model"]}
+            if row["type"] == "gap":
+                new_gaps.append(row["text"])
+                gaps_wm.append(entry)
+            elif row["type"] == "conflict":
+                new_conflicts.append(row["text"])
+                conflicts_wm.append(entry)
+            else:  # deepen + custom both go in the deepen bucket
+                new_deepen.append(row["text"])
+                deepen_wm.append(entry)
 
-                # Numbered suggestions
-                if suggestions:
-                    console.print("[bold]Proposed follow-ups:[/]")
-                    type_colors = {"gap": "red", "conflict": "yellow", "deepen": "cyan"}
-                    for i, (stype, text) in enumerate(suggestions, 1):
-                        color = type_colors.get(stype, "white")
-                        label = stype.upper()
-                        console.print(f"  [bold]{i}.[/] [{color}][{label}][/] {text}")
-                    console.print()
+        decision["gaps"] = new_gaps
+        decision["conflicts"] = new_conflicts
+        decision["deepen"] = new_deepen
+        decision["gaps_with_model"] = gaps_wm
+        decision["conflicts_with_model"] = conflicts_wm
+        decision["deepen_with_model"] = deepen_wm
 
-                # Options
-                options_lines = ["[green]Enter[/]      Approve all follow-ups"]
-                if suggestions:
-                    options_lines.append("[cyan]1,3,5[/]     Select specific follow-ups")
-                options_lines.append("[magenta]+text[/]     Add custom direction (e.g. 1,3,+my topic)")
-                options_lines.append("[yellow]s[/]         Stop researching, synthesize now")
-                options_lines.append("[red]q[/]         Quit (progress saved)")
-                console.print(Panel(
-                    "\n".join(options_lines),
-                    title="[bold yellow]ITERATION GATE[/]",
-                    subtitle=f"[dim]{gate_id}[/]",
-                    border_style="yellow",
-                    padding=(0, 2),
-                ))
+        self._save_gate_status(gate_id, "approved", requested_at)
+        if self.progress:
+            self.progress.approval_received(gate_id, True)
+        return True
 
-                try:
-                    response = console.input("[bold]Choice:[/] ").strip()
-                except EOFError:
-                    ui.warning("No interactive input available — rejecting for safety")
-                    response = "q"
-            else:
-                # Plain-text fallback
-                print(f"\n{'='*60}")
-                print(f"ITERATION GATE — iteration {iteration}")
-                print(f"{'='*60}")
+    def _run_iteration_tui(self, rows, coverage, decision, research_meta,
+                            iteration, sufficient, gate_id, default_model):
+        """Drive the navigable iteration gate.
 
-                if coverage and isinstance(coverage, dict):
-                    print("\nCoverage:")
-                    for area, info in coverage.items():
-                        if isinstance(info, dict):
-                            print(f"  {area}: {info.get('score', 0)}% — {info.get('note', '')}")
+        Returns one of: "approve", "stop", "quit". On "approve" the `rows`
+        list reflects the user's final approve/model choices (in-place).
+        """
+        # Detect whether we can run the rich TUI; otherwise fall back.
+        can_keyboard = False
+        if RICH_AVAILABLE:
+            probe = KeyboardListener(lambda c: None)
+            can_keyboard = probe.available
+        if not (RICH_AVAILABLE and can_keyboard):
+            return self._iteration_tui_plain(
+                rows, coverage, decision, research_meta,
+                iteration, sufficient, gate_id, default_model,
+            )
 
-                print(f"\nIteration: {iteration}")
-                print(f"Completed: {research_meta.get('completed_agents', 0)} agents, {research_meta.get('total_research_words', 0)} words")
-                if decision.get("estimated_additional_cost"):
-                    print(f"Est. cost: {decision['estimated_additional_cost']}")
-                print(f"\nReasoning: {decision.get('reasoning', 'N/A')[:200]}")
+        console = Console()
+        cursor = [0]
+        key_q: "queue.Queue[str]" = queue.Queue()
+        esc = {"state": 0}  # 0=none, 1=ESC, 2=ESC[
 
-                if suggestions:
-                    print("\nProposed follow-ups:")
-                    for i, (stype, text) in enumerate(suggestions, 1):
-                        print(f"  {i}. [{stype.upper()}] {text}")
+        def on_key(ch: str):
+            if ch == "\x1b":
+                esc["state"] = 1
+                return
+            if esc["state"] == 1:
+                if ch == "[":
+                    esc["state"] = 2
+                    return
+                esc["state"] = 0
+                return
+            if esc["state"] == 2:
+                esc["state"] = 0
+                if ch == "A":
+                    key_q.put("UP")
+                    return
+                if ch == "B":
+                    key_q.put("DOWN")
+                    return
+                return  # other CSI sequence, ignore
+            key_q.put(ch)
 
-                if suggestions:
-                    print(f"\n  Enter = approve all | 1,3,5 = select | +text = add custom")
+        listener = KeyboardListener(on_key)
+
+        type_colors = {"gap": "red", "conflict": "yellow", "deepen": "cyan", "custom": "magenta"}
+
+        def build_display():
+            items = []
+
+            # Header: coverage + stats
+            if coverage and isinstance(coverage, dict):
+                cov = Table(show_header=True, box=None, padding=(0, 1))
+                cov.add_column("Area", style="white", min_width=20)
+                cov.add_column("Score", justify="center", width=7)
+                cov.add_column("Status", style="dim")
+                for area, info in coverage.items():
+                    if not isinstance(info, dict):
+                        continue
+                    score = info.get("score", 0)
+                    note = info.get("note", "")
+                    if score >= 80:
+                        ss = "bold green"
+                    elif score >= 50:
+                        ss = "bold yellow"
+                    else:
+                        ss = "bold red"
+                    cov.add_row(area, f"[{ss}]{score}%[/]", str(note))
+                items.append(cov)
+
+            approved = sum(1 for r in rows if r["approved"])
+            stats = Text()
+            stats.append(f"Iteration {iteration}", "white")
+            stats.append("  ·  ", "dim")
+            stats.append(f"{research_meta.get('completed_agents', 0)} agents", "white")
+            stats.append("  ·  ", "dim")
+            stats.append(f"{research_meta.get('total_research_words', 0)} words", "white")
+            stats.append("  ·  ", "dim")
+            stats.append(f"Approved {approved}/{len(rows)}", "cyan")
+            if decision.get("estimated_additional_cost"):
+                stats.append("  ·  ", "dim")
+                stats.append(f"Est. (all): {decision['estimated_additional_cost']}", "dim")
+            if sufficient:
+                stats.append("  ·  ", "dim")
+                stats.append("decision agent says sufficient", "dim yellow")
+            items.append(stats)
+
+            reasoning = decision.get("reasoning") or "N/A"
+            items.append(Text(f"Reasoning: {reasoning[:300]}", style="white"))
+
+            # Suggestion table
+            table = Table(show_header=True, box=ROUNDED, padding=(0, 1), expand=True)
+            table.add_column("#", width=3, justify="right", no_wrap=True)
+            table.add_column("Type", width=10, no_wrap=True)
+            table.add_column("OK", width=4, justify="center", no_wrap=True)
+            table.add_column("Model", width=8, no_wrap=True)
+            table.add_column("Suggestion", overflow="fold")
+            for i, row in enumerate(rows):
+                stype = row["type"]
+                color = type_colors.get(stype, "white")
+                label = f"[{color}]{stype.upper()}[/]"
+                ok = "[green]✓[/]" if row["approved"] else "[red]✗[/]"
+                mc = "magenta" if row["model"] == "opus" else "cyan"
+                mdl = f"[{mc}]{row['model']}[/]"
+                num = str(i + 1)
+                text = row["text"]
+                if i == cursor[0]:
+                    items_style = "bold on grey23"
+                    table.add_row(
+                        f"[{items_style}]{num}[/]",
+                        f"[{items_style}]{stype.upper()}[/]",
+                        f"[{items_style}]{'✓' if row['approved'] else '✗'}[/]",
+                        f"[{items_style}]{row['model']}[/]",
+                        f"[{items_style}]{text}[/]",
+                    )
                 else:
-                    print(f"\n  Enter = approve all | +text = add custom direction")
-                print(f"  s = stop & synthesize | q = quit")
+                    table.add_row(num, label, ok, mdl, text)
+            items.append(table)
 
+            # Key hints
+            hint = Text()
+            hint.append("↑/↓ navigate  ", "dim cyan")
+            hint.append("space toggle  ", "dim cyan")
+            hint.append("s/o model  ", "dim cyan")
+            hint.append("a/d all  ", "dim cyan")
+            hint.append("S/O bulk model  ", "dim cyan")
+            hint.append("+ custom  ", "dim magenta")
+            hint.append("Enter confirm  ", "dim green")
+            hint.append("q quit", "dim red")
+            items.append(Panel(
+                hint,
+                title="[bold yellow]ITERATION GATE[/]",
+                subtitle=f"[dim]{gate_id}[/]",
+                border_style="yellow",
+                padding=(0, 1),
+            ))
+
+            return Group(*items)
+
+        action = None
+        listener.start()
+        live = None
+        try:
+            live = Live(
+                build_display(),
+                console=console,
+                refresh_per_second=10,
+                screen=False,
+                auto_refresh=False,
+            )
+            # refresh=True is required for the initial frame to render when
+            # auto_refresh=False — without it Rich stores the renderable but
+            # never draws it, so the first visible frame is whatever the user's
+            # first keypress produces (looks like every action is one ahead).
+            live.start(refresh=True)
+            while action is None:
                 try:
-                    response = input("Choice: ").strip()
-                except EOFError:
-                    ui.warning("No interactive input available — rejecting for safety")
-                    response = "q"
+                    ch = key_q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
 
-            # --- Handle response ---
+                if ch in ("UP", "k"):
+                    if rows:
+                        cursor[0] = (cursor[0] - 1) % len(rows)
+                elif ch in ("DOWN", "j"):
+                    if rows:
+                        cursor[0] = (cursor[0] + 1) % len(rows)
+                elif ch == " ":
+                    if rows:
+                        rows[cursor[0]]["approved"] = not rows[cursor[0]]["approved"]
+                elif ch == "s":
+                    if rows:
+                        rows[cursor[0]]["model"] = "sonnet"
+                elif ch == "o":
+                    if rows:
+                        rows[cursor[0]]["model"] = "opus"
+                elif ch == "a":
+                    for r in rows:
+                        r["approved"] = True
+                elif ch == "d":
+                    for r in rows:
+                        r["approved"] = False
+                elif ch == "S":
+                    for r in rows:
+                        if r["approved"]:
+                            r["model"] = "sonnet"
+                elif ch == "O":
+                    for r in rows:
+                        if r["approved"]:
+                            r["model"] = "opus"
+                elif ch in ("\r", "\n"):
+                    action = "approve"
+                    break
+                elif ch == "q":
+                    action = "quit"
+                    break
+                elif ch == "+":
+                    # Stop Live + listener, prompt for custom direction, restart.
+                    listener.stop()
+                    live.stop()
+                    try:
+                        text = console.input("[bold magenta]Custom direction (Enter to cancel):[/] ").strip()
+                    except EOFError:
+                        text = ""
+                    if text:
+                        rows.append({
+                            "type": "custom",
+                            "text": text,
+                            "approved": True,
+                            "model": default_model,
+                        })
+                        cursor[0] = len(rows) - 1
+                    live = Live(
+                        build_display(),
+                        console=console,
+                        refresh_per_second=10,
+                        screen=False,
+                        auto_refresh=False,
+                    )
+                    live.start(refresh=True)
+                    listener.start()
+                    continue
+
+                live.update(build_display(), refresh=True)
+        finally:
+            try:
+                listener.stop()
+            except Exception:
+                pass
+            if live is not None:
+                try:
+                    live.stop()
+                except Exception:
+                    pass
+
+        return action or "quit"
+
+    def _iteration_tui_plain(self, rows, coverage, decision, research_meta,
+                              iteration, sufficient, gate_id, default_model):
+        """Plain-text fallback when Rich or /dev/tty isn't available.
+
+        Uses the original comma-list selection flow.
+        """
+        suggestions = [(r["type"], r["text"]) for r in rows]
+        while True:
+            print(f"\n{'='*60}")
+            print(f"ITERATION GATE — iteration {iteration}")
+            print(f"{'='*60}")
+
+            if coverage and isinstance(coverage, dict):
+                print("\nCoverage:")
+                for area, info in coverage.items():
+                    if isinstance(info, dict):
+                        print(f"  {area}: {info.get('score', 0)}% — {info.get('note', '')}")
+
+            print(f"\nIteration: {iteration}")
+            print(f"Completed: {research_meta.get('completed_agents', 0)} agents, "
+                  f"{research_meta.get('total_research_words', 0)} words")
+            if decision.get("estimated_additional_cost"):
+                print(f"Est. cost: {decision['estimated_additional_cost']}")
+            print(f"\nReasoning: {decision.get('reasoning', 'N/A')[:200]}")
+
+            if suggestions:
+                print("\nProposed follow-ups:")
+                for i, (stype, text) in enumerate(suggestions, 1):
+                    print(f"  {i}. [{stype.upper()}] {text}")
+
+            enter_label = "proceed to synthesis" if sufficient else "approve all"
+            if suggestions:
+                print(f"\n  Enter = {enter_label} | 1,3,5 = select | +text = add custom")
+            else:
+                print(f"\n  Enter = {enter_label} | +text = add custom direction")
+            print(f"  s = stop & synthesize | q = quit")
+
+            try:
+                response = input("Choice: ").strip()
+            except EOFError:
+                ui.warning("No interactive input available — rejecting for safety")
+                response = "q"
+
             r = response.lower()
             if r == "q":
-                self._save_gate_status(gate_id, "quit", requested_at)
-                if self.progress:
-                    self.progress.approval_received(gate_id, False)
-                raise KeyboardInterrupt("User quit at approval gate")
-
+                return "quit"
             if r == "s":
-                self._save_gate_status(gate_id, "stopped_early", requested_at)
-                if self.progress:
-                    self.progress.approval_received(gate_id, False)
-                return False
-
+                return "stop"
             if r == "":
-                # Approve all — no filtering
-                self._save_gate_status(gate_id, "approved", requested_at)
-                if self.progress:
-                    self.progress.approval_received(gate_id, True)
-                return True
+                if sufficient:
+                    # Accept assessment: deny all and stop
+                    for row in rows:
+                        row["approved"] = False
+                    return "stop"
+                # Approve all
+                for row in rows:
+                    row["approved"] = True
+                return "approve"
 
-            # Parse selection: numbers and +custom entries
             selected_indices = set()
             custom_directions = []
             valid = True
-
             for part in response.split(","):
                 part = part.strip()
                 if part.startswith("+"):
@@ -473,36 +702,20 @@ class ApprovalGate:
                     except ValueError:
                         ui.warning(f"Unrecognized input '{part}'. Use numbers, +text, s, or q")
                         valid = False
-
             if not valid:
-                continue  # Re-prompt on any parse error
+                continue
 
-            # Filter decision dict in-place
-            if selected_indices or custom_directions:
-                new_gaps = []
-                new_conflicts = []
-                new_deepen = []
-
-                for i, (stype, text) in enumerate(suggestions):
-                    if i in selected_indices:
-                        if stype == "gap":
-                            new_gaps.append(text)
-                        elif stype == "conflict":
-                            new_conflicts.append(text)
-                        elif stype == "deepen":
-                            new_deepen.append(text)
-
-                for custom in custom_directions:
-                    new_deepen.append(custom)
-
-                decision["gaps"] = new_gaps
-                decision["conflicts"] = new_conflicts
-                decision["deepen"] = new_deepen
-
-            self._save_gate_status(gate_id, "approved", requested_at)
-            if self.progress:
-                self.progress.approval_received(gate_id, True)
-            return True
+            # Apply selection to rows
+            for i, row in enumerate(rows):
+                row["approved"] = (i in selected_indices)
+            for custom in custom_directions:
+                rows.append({
+                    "type": "custom",
+                    "text": custom,
+                    "approved": True,
+                    "model": default_model,
+                })
+            return "approve"
 
     def _save_gate_status(self, gate_id: str, status: str,
                           requested_at: str = None):

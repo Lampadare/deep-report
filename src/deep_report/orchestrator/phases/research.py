@@ -39,6 +39,7 @@ def run_research(
     Returns:
         True if research succeeded, False otherwise
     """
+    state.current_phase = 3
     state.checkpoint("research_started")
 
     report_dir = Path(state.report_dir)
@@ -53,7 +54,8 @@ def run_research(
     max_iterations = state.max_iterations
 
     # APPROVAL GATE: Before first research run (with feedback loop)
-    if approval and state.research_iteration == 0:
+    # Skip on resume when threads are already completed
+    if approval and state.research_iteration == 0 and not state.completed_threads:
         while True:
             gate_result = approval.pre_research_gate(state)
             if gate_result is True:
@@ -104,12 +106,14 @@ def run_research(
             state.research_iteration = iteration
             state.checkpoint(f"research_batch_{iteration}_complete")
 
-            # Summarize all unsummarized outputs (including from prior runs)
-            ui.step("Summarizing research outputs")
-            if progress:
-                progress.update(3, "Summarizing", "checking for unsummarized outputs")
-            _summarize_outputs(state)
-            state.checkpoint(f"summaries_{iteration}_complete")
+        # Summarize all unsummarized outputs (including from prior runs).
+        # Runs unconditionally so resumed runs with completed-but-unsummarized
+        # threads still get summaries before the decision agent.
+        ui.step("Summarizing research outputs")
+        if progress:
+            progress.update(3, "Summarizing", "checking for unsummarized outputs")
+        _summarize_outputs(state)
+        state.checkpoint(f"summaries_{iteration}_complete")
 
         # Decision agent: should we go deeper?
         if iteration < max_iterations:
@@ -128,9 +132,11 @@ def run_research(
                     max_iterations=max_iterations,
                 )
 
+            sufficient = decision.get("sufficient", True)
+
             ui.decision(
                 iteration,
-                decision.get('sufficient', True),
+                sufficient,
                 decision.get('reasoning', 'N/A'),
                 coverage=decision.get('coverage'),
             )
@@ -138,33 +144,43 @@ def run_research(
             if progress:
                 progress.decision(
                     iteration,
-                    decision.get("sufficient", True),
+                    sufficient,
                     decision.get("reasoning", "N/A")
                 )
 
-            if decision.get("sufficient", True):
-                ui.success("Research deemed sufficient")
-                break
-
-            # APPROVAL GATE: Before each follow-up iteration
-            if approval:
-                # Estimate additional cost for proposed follow-up threads
+            if approval and approval.interactive:
+                # Interactive mode: ALWAYS show gate, let user decide
                 followup_count = (
                     len(decision.get("gaps", []))
                     + len(decision.get("conflicts", []))
                     + len(decision.get("deepen", []))
                 )
-                # Rough estimate: per-agent cost based on avg duration so far
                 if state.completed_threads:
                     avg_cost = state.total_cost / len(state.completed_threads)
                 else:
-                    avg_cost = 0.50  # fallback estimate
-                estimated_additional = avg_cost * followup_count
-                decision["estimated_additional_cost"] = f"~${estimated_additional:.2f} ({followup_count} threads)"
-                ui.info(f"Estimated additional cost: ~${estimated_additional:.2f} for {followup_count} follow-up threads (running total: ${state.total_cost:.2f}, excludes third-party API costs)")
+                    avg_cost = 0.50
+                if followup_count > 0:
+                    estimated_additional = avg_cost * followup_count
+                    decision["estimated_additional_cost"] = f"~${estimated_additional:.2f} ({followup_count} threads)"
+                    ui.info(f"Estimated additional cost: ~${estimated_additional:.2f} for {followup_count} follow-up threads (running total: ${state.total_cost:.2f}, excludes third-party API costs)")
 
+                decision["_sufficient"] = sufficient
                 if not approval.iteration_gate(state, decision, iteration):
-                    ui.info("User stopped iterations, proceeding to synthesis")
+                    ui.info("Proceeding to synthesis")
+                    break
+
+                # If gate approved but no follow-ups remain (user pressed Enter on
+                # sufficient assessment, or selected nothing), stop researching
+                has_followups = (
+                    decision.get("gaps") or decision.get("conflicts") or decision.get("deepen")
+                )
+                if not has_followups:
+                    ui.success("No follow-up directions — proceeding to synthesis")
+                    break
+            else:
+                # Non-interactive: respect decision agent's assessment
+                if sufficient:
+                    ui.success("Research deemed sufficient")
                     break
 
             # Create follow-up threads from decision
@@ -258,11 +274,12 @@ def _run_research_batch(
             use_mcp=mcp_config is not None,
         )
 
+        task_model = thread.get("model") or state.research_model
         tasks.append({
             "id": thread_id,
             "title": title,
             "prompt": prompt,
-            "model": state.research_model,
+            "model": task_model,
             "output_file": str(output_file),
             "timeout_secs": DEFAULT_TIMEOUT,
             "max_retries": 3,
@@ -656,12 +673,28 @@ def _gather_all_summaries(report_dir: Path) -> list[str]:
 
 
 def _create_followups(state: State, decision: dict, iteration: int):
-    """Create follow-up research threads from decision agent output."""
+    """Create follow-up research threads from decision agent output.
+
+    If the iteration gate populated `*_with_model` sibling lists, each
+    follow-up gets its own model. Otherwise the model falls back to
+    `state.research_model`.
+    """
 
     followups = []
+    default_model = state.research_model
+
+    def _zip_entries(flat_key: str, with_model_key: str):
+        """Yield (focus, model) pairs from either *_with_model or flat list."""
+        wm = decision.get(with_model_key)
+        if wm:
+            for entry in wm:
+                yield entry.get("focus", ""), entry.get("model", default_model)
+        else:
+            for focus in decision.get(flat_key, []):
+                yield focus, default_model
 
     # Gaps need new research
-    for i, gap in enumerate(decision.get("gaps", [])):
+    for i, (gap, model) in enumerate(_zip_entries("gaps", "gaps_with_model")):
         followups.append({
             "id": f"followup_{iteration}_gap_{i+1}",
             "reason": "gap",
@@ -672,10 +705,11 @@ def _create_followups(state: State, decision: dict, iteration: int):
             "parent_threads": [],
             "iteration": iteration + 1,
             "status": "pending",
+            "model": model,
         })
 
     # Conflicts need resolution
-    for i, conflict in enumerate(decision.get("conflicts", [])):
+    for i, (conflict, model) in enumerate(_zip_entries("conflicts", "conflicts_with_model")):
         followups.append({
             "id": f"followup_{iteration}_conflict_{i+1}",
             "reason": "conflict",
@@ -686,10 +720,11 @@ def _create_followups(state: State, decision: dict, iteration: int):
             "parent_threads": [],
             "iteration": iteration + 1,
             "status": "pending",
+            "model": model,
         })
 
     # Areas to deepen
-    for i, area in enumerate(decision.get("deepen", [])):
+    for i, (area, model) in enumerate(_zip_entries("deepen", "deepen_with_model")):
         followups.append({
             "id": f"followup_{iteration}_deepen_{i+1}",
             "reason": "deepen",
@@ -700,6 +735,7 @@ def _create_followups(state: State, decision: dict, iteration: int):
             "parent_threads": [],
             "iteration": iteration + 1,
             "status": "pending",
+            "model": model,
         })
 
     for fu in followups:

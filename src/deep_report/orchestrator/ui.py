@@ -124,6 +124,54 @@ class DeepReportUI:
         self._footer_live = None
         self._active_content = None  # callable returning a Renderable, or None
         self._session_cost = 0.0
+        # Verbose toggle keyboard listener (owned by main, registered here so
+        # input_mode() can pause it while gates read input)
+        self._verbose_toggle = None
+
+    def attach_verbose_toggle(self, vt):
+        """Register the global verbose toggle so input_mode() can pause it.
+
+        The toggle's keyboard listener puts /dev/tty into cbreak mode, which
+        steals keystrokes from any subsequent console.input() call. The gates
+        wrap themselves in input_mode() to briefly release the TTY.
+        """
+        self._verbose_toggle = vt
+
+    @contextmanager
+    def input_mode(self):
+        """Briefly hand the TTY back to a plain console.input() call.
+
+        Stops the persistent footer Live and the verbose keyboard listener so
+        the terminal is in cooked mode and no thread is reading bytes. Both
+        are restarted on exit.
+        """
+        # Snapshot whether things were running so we only restart what we stopped
+        had_footer = self._footer_live is not None
+        if had_footer:
+            try:
+                self._footer_live.stop()
+            except Exception:
+                pass
+            self._footer_live = None
+        had_toggle = self._verbose_toggle is not None
+        if had_toggle:
+            try:
+                self._verbose_toggle.pause()
+            except Exception:
+                pass
+        try:
+            yield
+        finally:
+            if had_toggle:
+                try:
+                    self._verbose_toggle.resume()
+                except Exception:
+                    pass
+            if had_footer:
+                try:
+                    self.start_session()
+                except Exception:
+                    pass
 
     def set_verbose(self, enabled: bool):
         """Enable or disable verbose mode."""

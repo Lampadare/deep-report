@@ -19,6 +19,7 @@ def run_synthesize(state: State) -> bool:
     Returns:
         True if synthesis succeeded, False otherwise
     """
+    state.current_phase = 4
     state.checkpoint("synthesize_started")
 
     report_dir = Path(state.report_dir)

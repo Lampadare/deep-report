@@ -172,6 +172,7 @@ def run_setup(state: State, args: dict) -> bool:
     # Set state file path early, before any save() or checkpoint() calls
     state._state_file = str(Path(report_dir) / "state" / "orchestrator_state.json")
 
+    state.current_phase = 1
     state.checkpoint("setup_started")
 
     # Store config
@@ -183,6 +184,7 @@ def run_setup(state: State, args: dict) -> bool:
     state.report_type = args.get("report_type", "deep-dive")
     state.seed_urls = args.get("seed_urls", [])
     state.seed_refs_folder = args.get("seed_refs_folder")
+    state.interactive = args.get("interactive", False)
 
     # Auto-detect seeds if not explicitly provided
     if not state.seed_refs_folder and not state.seed_urls:

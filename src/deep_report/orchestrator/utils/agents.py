@@ -937,7 +937,11 @@ Map each major topic area from the research brief to a coverage entry.
 
 If iteration >= {max_iterations}, set sufficient=true regardless.
 If there are no significant gaps/conflicts/areas to deepen, set sufficient=true.
-Be conservative - only request more research if genuinely needed.
+
+IMPORTANT: Even when setting sufficient=true, ALWAYS populate the gaps, conflicts, and
+deepen lists with potential improvements or directions worth exploring. These are shown to
+the user as optional directions they may choose to pursue. Aim for at least 3-5 suggestions
+total across all three lists, even when coverage is strong.
 """
 
     result = spawn_agent(

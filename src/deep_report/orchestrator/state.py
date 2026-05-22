@@ -37,6 +37,7 @@ if HAS_PYDANTIC:
         seed_urls: list[str] = Field(default_factory=list)
         expertise_level: str = "intermediate"
         report_type: str = "deep-dive"
+        interactive: bool = False
         current_phase: int = Field(default=0, ge=0, le=5)
         current_step: str = ""
         seeds_processed: bool = False
@@ -143,6 +144,7 @@ class State:
     seed_urls: list[str] = field(default_factory=list)
     expertise_level: str = "intermediate"
     report_type: str = "deep-dive"
+    interactive: bool = False
 
     # Phase tracking
     current_phase: int = 0
@@ -340,8 +342,40 @@ class State:
         self.current_step = step
         self.save()
 
+        # Keep registry in sync with state at every checkpoint
+        if self.report_dir:
+            try:
+                from .registry import registry
+                registry.update(
+                    Path(self.report_dir),
+                    phase=self.current_phase,
+                    step=self.current_step,
+                )
+            except Exception:
+                pass  # Registry is best-effort
+
     def get_pending_threads(self) -> list[dict]:
-        """Get threads that haven't been completed."""
+        """Get threads that haven't been completed.
+
+        Also reconciles state with disk: threads marked completed but whose
+        output files are missing are demoted back to pending.
+        """
+        demoted = []
+        for t in self.threads:
+            tid = t.get("id")
+            if tid in self.completed_threads:
+                output = t.get("output_file")
+                if output and not Path(output).exists():
+                    demoted.append(tid)
+                    t.pop("status", None)
+                    t.pop("output_file", None)
+        if demoted:
+            for tid in demoted:
+                self.completed_threads.remove(tid)
+            from .ui import ui
+            ui.warning(f"Reconciled {len(demoted)} threads with missing output files: {demoted}")
+            self.save()
+
         return [t for t in self.threads
                 if t.get("id") not in self.completed_threads
                 and t.get("id") not in self.failed_threads]
