@@ -28,6 +28,15 @@ Repository = "https://github.com/lampadare/deep-report"
 [tool.hatch.build.targets.wheel]
 packages = ["src/deep_report"]
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "SEARCH_TOOLS.md",
+  "SEARCH_TOOLS_FIXES.md",
+  "uv.lock",
+  ".gitignore",
+  "tests/",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
