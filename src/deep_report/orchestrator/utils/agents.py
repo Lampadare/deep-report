@@ -127,12 +127,13 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
             "env": {"FIRECRAWL_API_KEY": os.environ["FIRECRAWL_API_KEY"]},
         }
 
-    # Tavily — agent-optimized search + extract (free tier: 1k credits/month)
-    if has_npx and os.environ.get("TAVILY_API_KEY"):
+    # Tavily — agent-optimized search via remote HTTP endpoint (free tier: 1k credits/mo).
+    # No Node required — same pattern as Exa.
+    tavily_key = os.environ.get("TAVILY_API_KEY")
+    if tavily_key:
         servers["tavily"] = {
-            "command": "npx",
-            "args": ["-y", "tavily-mcp"],
-            "env": {"TAVILY_API_KEY": os.environ["TAVILY_API_KEY"]},
+            "type": "http",
+            "url": f"https://mcp.tavily.com/mcp/?tavilyApiKey={tavily_key}",
         }
 
     # Exa uses HTTP transport with API key passed as query parameter
