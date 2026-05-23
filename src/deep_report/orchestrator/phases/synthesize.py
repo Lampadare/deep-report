@@ -23,7 +23,12 @@ def run_synthesize(state: State) -> bool:
     state.checkpoint("synthesize_started")
 
     report_dir = Path(state.report_dir)
-    agent_count = len(state.completed_threads) + len([f for f in state.followups if f.get("status") == "completed"])
+    # Followup IDs already land in `state.completed_threads` via the research
+    # completion handler, so adding completed-followup count here would
+    # double-count and push the report past the multi-pass threshold
+    # unnecessarily. Use the unique set of completed thread IDs as the
+    # ground-truth count.
+    agent_count = len(set(state.completed_threads))
 
     # Guard: need at least some completed research
     if agent_count == 0:
@@ -94,8 +99,16 @@ def _single_pass_synthesis(state: State, report_dir: Path) -> bool:
     full_dir = report_dir / "full" / "agents"
     report_file = report_dir / "report.md"
 
-    # Gather file paths - agent will read them
-    research_files = sorted(full_dir.glob("*.md"))
+    # Gather file paths — restrict to threads we actually marked as completed
+    # so partial files left behind by timed-out / failed agents aren't fed in
+    # as if they were valid research.
+    completed = set(state.completed_threads)
+    all_files = sorted(full_dir.glob("*.md"))
+    research_files = [f for f in all_files if f.stem in completed]
+    skipped = [f.stem for f in all_files if f.stem not in completed]
+    if skipped:
+        ui.warning(f"Skipping {len(skipped)} agent output(s) not in completed_threads: "
+                   f"{', '.join(skipped[:5])}{'…' if len(skipped) > 5 else ''}")
     if not research_files:
         ui.error("Synthesis failed: no research files found")
         return False
