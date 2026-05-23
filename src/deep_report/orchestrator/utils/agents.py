@@ -314,8 +314,29 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
         config_path = state_dir / "mcp.json"
-        config_path.write_text(json.dumps(config, indent=2))
-        # mcp.json embeds plaintext API keys — keep it user-readable only.
+        # mcp.json embeds plaintext API keys. Create the file mode-restricted
+        # in a single syscall (O_CREAT with mode 0o600) instead of
+        # write-then-chmod — eliminates the sub-millisecond window where the
+        # file would otherwise be world-readable at the default umask.
+        payload = json.dumps(config, indent=2).encode("utf-8")
+        fd = os.open(
+            config_path,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o600,
+        )
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(payload)
+        except Exception:
+            # If fdopen took ownership it closed fd on exit; if not, close it.
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        # Belt-and-suspenders: if the file already existed before this call
+        # and the open didn't replace its mode (some FS / umask interactions),
+        # tighten it now. No-op on POSIX where O_CREAT honoured 0o600.
         try:
             config_path.chmod(0o600)
         except OSError:

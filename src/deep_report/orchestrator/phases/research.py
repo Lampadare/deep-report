@@ -101,10 +101,13 @@ def run_research(
                 intervention_handler=intervention_handler,
             )
 
-            # on_complete already updated state + saved incrementally
-            # Persist iteration number only after batch succeeds (not before,
-            # so an interrupted batch doesn't skip the iteration on resume)
-            state.research_iteration = iteration
+            # on_complete already updated state + saved incrementally.
+            # Note: research_iteration is persisted at the END of this loop
+            # iteration (after _create_followups), not here, so a crash
+            # between batch completion and follow-up creation causes a clean
+            # re-do on resume rather than silently skipping the followup
+            # slot — get_pending_threads() filters completed threads, so the
+            # rerun batch is a no-op.
             state.checkpoint(f"research_batch_{iteration}_complete")
 
         # Summarize all unsummarized outputs (including from prior runs).
@@ -168,6 +171,8 @@ def run_research(
                 decision["_sufficient"] = sufficient
                 if not approval.iteration_gate(state, decision, iteration):
                     ui.info("Proceeding to synthesis")
+                    state.research_iteration = iteration
+                    state.checkpoint(f"research_iteration_{iteration}_complete")
                     break
 
                 # If gate approved but no follow-ups remain (user pressed Enter on
@@ -177,15 +182,26 @@ def run_research(
                 )
                 if not has_followups:
                     ui.success("No follow-up directions — proceeding to synthesis")
+                    state.research_iteration = iteration
+                    state.checkpoint(f"research_iteration_{iteration}_complete")
                     break
             else:
                 # Non-interactive: respect decision agent's assessment
                 if sufficient:
                     ui.success("Research deemed sufficient")
+                    state.research_iteration = iteration
+                    state.checkpoint(f"research_iteration_{iteration}_complete")
                     break
 
             # Create follow-up threads from decision
             _create_followups(state, decision, iteration)
+
+        # Iteration body fully complete — only NOW persist the counter so a
+        # crash between batch completion and _create_followups causes a clean
+        # re-do (resume will re-enter this same iteration; get_pending_threads
+        # returns an empty list for already-completed work).
+        state.research_iteration = iteration
+        state.checkpoint(f"research_iteration_{iteration}_complete")
 
     state.checkpoint("research_complete")
     state.mark_phase_complete(3)

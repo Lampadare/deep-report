@@ -290,7 +290,29 @@ Group related threads together. Every thread must be assigned to exactly one clu
     if result.success:
         data = extract_json(result.output)
         if data:
-            return data.get("clusters", [])
+            # The cluster agent occasionally hallucinates or echoes thread IDs
+            # that aren't in `completed`. Validate every returned thread_id so
+            # downstream _synthesize_clusters can't read partial-agent files.
+            raw_clusters = data.get("clusters", []) or []
+            cleaned: list[dict] = []
+            dropped_ids: list[str] = []
+            for cluster in raw_clusters:
+                tids = cluster.get("thread_ids") or []
+                kept = [tid for tid in tids if tid in completed]
+                bad = [tid for tid in tids if tid not in completed]
+                if bad:
+                    dropped_ids.extend(bad)
+                if kept:
+                    cleaned.append({**cluster, "thread_ids": kept})
+            if dropped_ids:
+                ui.warning(f"Cluster agent returned {len(dropped_ids)} non-completed "
+                           f"thread_id(s); dropping: "
+                           f"{', '.join(dropped_ids[:5])}"
+                           f"{'…' if len(dropped_ids) > 5 else ''}")
+            if cleaned:
+                return cleaned
+            # If every cluster came back empty after validation, fall through
+            # to the deterministic even-split fallback below.
 
     # Fallback: even split, restricted to completed threads.
     all_threads = [

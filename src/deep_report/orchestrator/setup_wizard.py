@@ -215,13 +215,26 @@ def save_config(enabled: list[str], imported: Optional[dict[str, dict]] = None) 
         payload["imported"] = imported
     # PID + monotonic_ns in the tmp suffix so two concurrent `--setup` runs
     # cannot collide on the same temp file (matches approval._atomic_write_json).
+    # Open the tmp file with mode 0o600 atomically — imported.env may carry
+    # plaintext API keys, so we must never have a window where the file is
+    # world-readable at the default umask.
     tmp = CONFIG_PATH.with_suffix(f".tmp.{os.getpid()}.{time.monotonic_ns()}")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n")
+    body = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(body)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
     os.replace(tmp, CONFIG_PATH)
     try:
-        CONFIG_PATH.chmod(0o600)  # imported.env may contain plaintext API keys
+        CONFIG_PATH.chmod(0o600)  # belt-and-suspenders for non-POSIX FS
     except OSError:
-        pass  # Windows / odd FS — non-fatal
+        pass
     return CONFIG_PATH
 
 
