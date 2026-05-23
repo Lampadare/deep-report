@@ -295,15 +295,15 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
     # Require at least one search-capable backend. Catalog entries are listed
     # explicitly; CC-imported MCPs are treated as search-capable on the user's
     # behalf (they explicitly opted in via the wizard, so a "no search provider"
-    # rejection would silently drop their selection).
+    # rejection would silently drop their selection). Compute eligibility from
+    # the post-validation `servers` dict so an import that failed schema
+    # validation doesn't bypass the gate.
     catalog_search_keys = {
         "brave-search", "exa", "firecrawl", "tavily",
         "pubmed", "openalex", "arxiv", "wikipedia",
     }
     has_catalog_search = any(k in servers for k in catalog_search_keys)
-    has_enabled_imports = bool(cc_imports) and (
-        user_enabled is None or any(name in user_enabled for name in cc_imports)
-    )
+    has_enabled_imports = any(name in servers for name in cc_imports)
     if not (has_catalog_search or has_enabled_imports):
         if servers:
             ui.verbose(f"MCP servers available ({list(servers)}) but no search provider — skipping MCP config")

@@ -231,15 +231,27 @@ def _multi_pass_synthesis(state: State, report_dir: Path) -> bool:
 def _cluster_threads(state: State, summaries_dir: Path) -> list[dict]:
     """Cluster research threads into thematic groups."""
 
-    # Gather all thread summaries
+    # Gather thread summaries — only for threads that actually completed.
+    # Partial summaries left behind by timed-out / failed agents would
+    # otherwise be fed into clustering and downstream cluster synthesis.
+    completed = set(state.completed_threads)
     thread_summaries = []
+    skipped_summaries = []
     for f in sorted(summaries_dir.glob("*_summary.md")):
         thread_id = f.stem.replace("_summary", "")
+        if thread_id not in completed:
+            skipped_summaries.append(thread_id)
+            continue
         try:
             content = f.read_text()[:500]
             thread_summaries.append(f"{thread_id}: {content}")
         except (OSError, IOError) as e:
             ui.warning(f"Summary reading failed for {f.name}: {e}")
+    if skipped_summaries:
+        ui.warning(f"Skipping {len(skipped_summaries)} summary file(s) "
+                   f"not in completed_threads: "
+                   f"{', '.join(skipped_summaries[:5])}"
+                   f"{'…' if len(skipped_summaries) > 5 else ''}")
 
     num_clusters = min(5, max(2, len(thread_summaries) // 4))
 
@@ -280,8 +292,12 @@ Group related threads together. Every thread must be assigned to exactly one clu
         if data:
             return data.get("clusters", [])
 
-    # Fallback: even split
-    all_threads = [f.stem.replace("_summary", "") for f in sorted(summaries_dir.glob("*_summary.md"))]
+    # Fallback: even split, restricted to completed threads.
+    all_threads = [
+        f.stem.replace("_summary", "")
+        for f in sorted(summaries_dir.glob("*_summary.md"))
+        if f.stem.replace("_summary", "") in completed
+    ]
     clusters = []
     chunk_size = max(1, len(all_threads) // num_clusters)
 

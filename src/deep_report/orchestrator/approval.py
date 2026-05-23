@@ -370,10 +370,22 @@ class ApprovalGate:
             )
             if result is False:
                 return False  # stop_early
-            # Approve all suggestions with default model
-            decision["gaps_with_model"] = [(r["text"], r["model"]) for r in rows if r["type"] == "gap"]
-            decision["conflicts_with_model"] = [(r["text"], r["model"]) for r in rows if r["type"] == "conflict"]
-            decision["deepen_with_model"] = [(r["text"], r["model"]) for r in rows if r["type"] == "deepen"]
+            # Approve all suggestions with default model. Use the same
+            # {"focus", "model"} dict shape as the Rich path so the
+            # downstream _create_followups._zip_entries (which calls
+            # `entry.get(...)`) works for both code paths.
+            decision["gaps_with_model"] = [
+                {"focus": r["text"], "model": r["model"]}
+                for r in rows if r["type"] == "gap"
+            ]
+            decision["conflicts_with_model"] = [
+                {"focus": r["text"], "model": r["model"]}
+                for r in rows if r["type"] == "conflict"
+            ]
+            decision["deepen_with_model"] = [
+                {"focus": r["text"], "model": r["model"]}
+                for r in rows if r["type"] == "deepen"
+            ]
             return True
 
         if self.progress:
@@ -941,16 +953,17 @@ class ApprovalGate:
                 except Exception as e:
                     ui.warning(f"Approval state save failed: {e}")
 
-                if allow_feedback and feedback:
-                    return feedback
-                if decision == "stop_early":
-                    return False
+                # Branch on `decision` first — a reject that happens to carry
+                # a feedback field must still abort, not be misinterpreted as
+                # replan feedback.
                 if decision == "reject":
-                    # Distinct from stop_early: reject = "abort, do not
-                    # synthesize either". Mirrors the interactive 'q' key.
                     raise KeyboardInterrupt(
                         f"Driver rejected approval gate '{gate_id}'"
                     )
+                if decision == "stop_early":
+                    return False
+                if allow_feedback and feedback:
+                    return feedback
                 return approved
 
             time.sleep(poll_secs)
