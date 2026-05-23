@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -212,7 +213,9 @@ def save_config(enabled: list[str], imported: Optional[dict[str, dict]] = None) 
     }
     if imported:
         payload["imported"] = imported
-    tmp = CONFIG_PATH.with_suffix(".json.tmp")
+    # PID + monotonic_ns in the tmp suffix so two concurrent `--setup` runs
+    # cannot collide on the same temp file (matches approval._atomic_write_json).
+    tmp = CONFIG_PATH.with_suffix(f".tmp.{os.getpid()}.{time.monotonic_ns()}")
     tmp.write_text(json.dumps(payload, indent=2) + "\n")
     os.replace(tmp, CONFIG_PATH)
     try:

@@ -1057,8 +1057,10 @@ class DeepReportUI:
         """
         # Machine mode has no interactive driver attached to stdin — bail
         # before any questionary or input() call could hang the process.
+        # Write to stderr so we don't pollute the machine-mode stdout contract.
         if self._machine_mode:
-            self.error("report_picker is interactive — not available in --machine mode")
+            print("error: report_picker is interactive — not available in --machine mode",
+                  file=sys.stderr)
             return None
         from pathlib import Path
         from datetime import datetime
@@ -1142,8 +1144,10 @@ class DeepReportUI:
         """
         # Machine mode has no driver hooked to stdin — bail before any
         # interactive call (questionary or input()) can hang the process.
+        # Write to stderr so we don't pollute the machine-mode stdout contract.
         if self._machine_mode:
-            self.error("report_picker_for_delete is interactive — not available in --machine mode")
+            print("error: report_picker_for_delete is interactive — not available in --machine mode",
+                  file=sys.stderr)
             return None
         from pathlib import Path
         from datetime import datetime

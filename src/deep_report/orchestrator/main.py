@@ -567,8 +567,10 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
     # ─── Step 2: Research Settings ───
     ui.step("Step 2/4 — Research Configuration")
 
-    # Agent count - use AI recommendation if available
-    agent_default = defaults.get('agents', 10)
+    # Agent count - use AI recommendation if available. `defaults.get('agents')`
+    # can be `None` when no --agents flag was passed; coerce to 10 so the
+    # interactive prompt doesn't receive a None default.
+    agent_default = defaults.get('agents') or 10
     if recs and isinstance(recs.get("agent_count"), int):
         rec_agents = max(3, min(recs["agent_count"], 30))
         agent_default = rec_agents

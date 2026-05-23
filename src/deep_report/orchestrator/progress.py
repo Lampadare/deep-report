@@ -86,7 +86,10 @@ class ProgressWriter:
             except OSError as e:
                 print(f"Warning: Could not write progress: {e}")
             finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass  # unlock is best-effort — close will release anyway
         finally:
             os.close(fd)
 
