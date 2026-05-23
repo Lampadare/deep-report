@@ -435,19 +435,24 @@ def _run_research_batch(
     # Log full agent conversations to logs/ for debugging
     log_dir = report_dir / "logs" / f"iteration_{iteration}"
 
-    results = spawn_agents_parallel(tasks, max_workers=max_workers, on_complete=on_complete,
-                                     intervention_handler=intervention_handler,
-                                     stream_callback_factory=make_stream_cb,
-                                     stagger_secs=60.0,
-                                     log_dir=log_dir)
-    ui.research_table_complete()
-
-    # Clean up mcp.json (contains API keys)
-    if mcp_config:
-        try:
-            mcp_config.unlink(missing_ok=True)
-        except OSError:
-            pass
+    try:
+        results = spawn_agents_parallel(tasks, max_workers=max_workers, on_complete=on_complete,
+                                         intervention_handler=intervention_handler,
+                                         stream_callback_factory=make_stream_cb,
+                                         stagger_secs=60.0,
+                                         log_dir=log_dir)
+        ui.research_table_complete()
+    finally:
+        # Clean up mcp.json (plaintext API keys) — runs even on
+        # KeyboardInterrupt / unexpected exception so the file doesn't
+        # linger on disk after a crash. spawn_agents_parallel's executor
+        # blocks until every child exits, so by the time we get here the
+        # children have already finished reading mcp.json.
+        if mcp_config:
+            try:
+                mcp_config.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # #14: Print failure summary
     failed_results = {tid: r for tid, r in results.items() if not r.success}

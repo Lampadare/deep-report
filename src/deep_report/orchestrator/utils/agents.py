@@ -284,16 +284,19 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
             ui.verbose(f"Skipping disabled MCPs per ~/.deep-report/mcp_config.json: {skipped}")
         servers = {k: v for k, v in servers.items() if k in user_enabled}
 
-    # Require at least one search backend. Context7 is library-docs, not a search
-    # provider — excluded. Crawl4ai/Playwright are fetchers, also excluded.
-    has_search = any(
-        k in servers
-        for k in (
-            "brave-search", "exa", "firecrawl", "tavily",
-            "pubmed", "openalex", "arxiv", "wikipedia",
-        )
+    # Require at least one search-capable backend. Catalog entries are listed
+    # explicitly; CC-imported MCPs are treated as search-capable on the user's
+    # behalf (they explicitly opted in via the wizard, so a "no search provider"
+    # rejection would silently drop their selection).
+    catalog_search_keys = {
+        "brave-search", "exa", "firecrawl", "tavily",
+        "pubmed", "openalex", "arxiv", "wikipedia",
+    }
+    has_catalog_search = any(k in servers for k in catalog_search_keys)
+    has_enabled_imports = bool(cc_imports) and (
+        user_enabled is None or any(name in user_enabled for name in cc_imports)
     )
-    if not has_search:
+    if not (has_catalog_search or has_enabled_imports):
         if servers:
             ui.verbose(f"MCP servers available ({list(servers)}) but no search provider — skipping MCP config")
         return None

@@ -860,6 +860,15 @@ Examples:
                 ui.warning("Setup did not complete — continuing with built-in"
                            " WebSearch/WebFetch fallback only.")
                 ui.info("Run `deep-report --setup` later to configure.")
+                # Fail-closed: persist an empty config so the runtime discovery
+                # doesn't silently re-enable every detectable MCP. Without
+                # this, `enabled_keys()` returns None ⇒ "no config, include
+                # everything", which contradicts the user's cancellation.
+                try:
+                    from .setup_wizard import save_config
+                    save_config([], imported=None)
+                except Exception as e:
+                    ui.warning(f"Could not persist empty config: {e}")
 
     # Machine mode: silent worker. Activate before any UI calls.
     if args.machine:
