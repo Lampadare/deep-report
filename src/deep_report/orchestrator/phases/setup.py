@@ -213,12 +213,13 @@ def run_setup(state: State, args: dict) -> bool:
         return False
     state.checkpoint("directories_created")
 
-    # Register in central registry
+    # Register in central registry. Failure here silently breaks --list /
+    # --resume so log it even though we don't fail the run.
     try:
         from ..registry import registry
         registry.register(report_dir, topic)
-    except Exception:
-        pass  # Registry is non-critical
+    except Exception as e:
+        ui.verbose(f"Registry registration failed (non-critical): {e}")
 
     # Write initial manifest
     try:
@@ -306,53 +307,67 @@ def _write_manifest(state: State):
         "current_phase": state.current_phase,
         "current_step": state.current_step,
     }
+    # Atomic write — a crash mid-write would otherwise leave a truncated
+    # manifest.json and break --resume / --list discovery.
     manifest_path = Path(state.report_dir) / "state" / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+    tmp_path = manifest_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(manifest, indent=2))
+    os.replace(tmp_path, manifest_path)
 
 
-def _read_excel_file(path: Path) -> str:
-    """Read Excel file and convert to markdown text."""
+def _read_excel_file(path: Path) -> Optional[str]:
+    """Read Excel file and convert to markdown text.
+
+    Returns None on any failure (missing libraries, corrupt file, parse
+    error) — the seed pipeline should skip a bad seed, not crash.
+    """
     try:
         import openpyxl
-        wb = openpyxl.load_workbook(path, data_only=True)
-
-        output = []
-        for sheet_name in wb.sheetnames:
-            output.append(f"\n## Sheet: {sheet_name}\n")
-            ws = wb[sheet_name]
-
-            rows = []
-            for row in ws.iter_rows(values_only=True):
-                if any(cell is not None for cell in row):
-                    rows.append([str(cell) if cell is not None else '' for cell in row])
-
-            if rows:
-                # Create markdown table
-                header = rows[0]
-                output.append("| " + " | ".join(header) + " |")
-                output.append("| " + " | ".join(["---"] * len(header)) + " |")
-                for row in rows[1:]:
-                    # Pad row if needed
-                    while len(row) < len(header):
-                        row.append('')
-                    output.append("| " + " | ".join(row[:len(header)]) + " |")
-
-        return "\n".join(output)
-
     except ImportError:
-        try:
-            import pandas as pd
-            df_dict = pd.read_excel(path, sheet_name=None)
+        openpyxl = None
 
+    if openpyxl is not None:
+        try:
+            wb = openpyxl.load_workbook(path, data_only=True)
             output = []
-            for sheet_name, df in df_dict.items():
+            for sheet_name in wb.sheetnames:
                 output.append(f"\n## Sheet: {sheet_name}\n")
-                output.append(df.to_markdown(index=False))
+                ws = wb[sheet_name]
+
+                rows = []
+                for row in ws.iter_rows(values_only=True):
+                    if any(cell is not None for cell in row):
+                        rows.append([str(cell) if cell is not None else '' for cell in row])
+
+                if rows:
+                    header = rows[0]
+                    output.append("| " + " | ".join(header) + " |")
+                    output.append("| " + " | ".join(["---"] * len(header)) + " |")
+                    for row in rows[1:]:
+                        while len(row) < len(header):
+                            row.append('')
+                        output.append("| " + " | ".join(row[:len(header)]) + " |")
 
             return "\n".join(output)
+        except Exception as e:
+            ui.warning(f"openpyxl failed to read {path.name}: {e}")
+            # fall through to pandas
 
-        except ImportError:
-            return None
+    try:
+        import pandas as pd
+        df_dict = pd.read_excel(path, sheet_name=None)
+
+        output = []
+        for sheet_name, df in df_dict.items():
+            output.append(f"\n## Sheet: {sheet_name}\n")
+            output.append(df.to_markdown(index=False))
+
+        return "\n".join(output)
+    except ImportError:
+        return None
+    except Exception as e:
+        ui.warning(f"pandas failed to read {path.name}: {e}")
+        return None
 
 
 def _process_seeds(state: State, seeds: list[str]) -> bool:
@@ -458,6 +473,14 @@ CRITICAL: You MUST call the Write tool with file_path="{output_file}" at the end
         })
 
     if not tasks:
+        # mcp.json embeds plaintext API keys — must clean it up even on the
+        # empty-task fast path, otherwise the file lingers on disk until the
+        # next run overwrites it.
+        if mcp_config:
+            try:
+                mcp_config.unlink(missing_ok=True)
+            except OSError:
+                pass
         return True
 
     # Progress tracking
@@ -466,16 +489,22 @@ CRITICAL: You MUST call the Write tool with file_path="{output_file}" at the end
     lock = threading.Lock()
 
     def on_complete(task_id: str, result):
+        # Snapshot the counter under the lock so concurrent on_complete calls
+        # don't both publish the same "current" number to the progress widget.
         with lock:
             completed[0] += 1
+            current = completed[0]
         status = "✓" if result.success else "✗"
-        ui.agent_progress_update(completed[0], f"{task_id}: {status}")
+        ui.agent_progress_update(current, f"{task_id}: {status}")
 
     try:
         results = spawn_agents_parallel(tasks, max_workers=5, on_complete=on_complete)
     finally:
         ui.agent_progress_complete(f"Processed {len(tasks)} seeds")
-        # Clean up mcp.json (contains API keys)
+        # Clean up mcp.json (contains API keys). spawn_agents_parallel blocks
+        # in its ThreadPoolExecutor __exit__ until every child subprocess has
+        # exited, so by the time we get here the children have already
+        # finished reading mcp.json.
         if mcp_config:
             try:
                 mcp_config.unlink(missing_ok=True)
@@ -507,10 +536,11 @@ def _summarize_seeds(state: State):
     for seed_file in seeds_dir.glob("*.md"):
         summary_file = summaries_dir / seed_file.name
 
-        # Read content here and pass directly
+        # Read content here and pass directly. Narrow the catch so signals
+        # and programming errors aren't silently swallowed.
         try:
             content = seed_file.read_text()
-        except Exception as e:
+        except (OSError, UnicodeDecodeError) as e:
             ui.warning(f"Seed file reading failed for {seed_file}: {e}")
             continue
 
@@ -609,8 +639,9 @@ CRITICAL: You MUST call Write tool with file_path="{scope_file}" to save the sco
             allowed_tools=["Read", "Write"]
         )
     if not result.success:
-        # Write a minimal scope if agent fails
-        scope_file.write_text(f"""# Research Scope: {state.topic}
+        # Write a minimal scope if agent fails. Atomic so a crash mid-fallback
+        # can't leave a half-written scope.md that confuses the next phase.
+        minimal = f"""# Research Scope: {state.topic}
 
 ## Objectives
 - Provide comprehensive coverage of {state.topic}
@@ -622,4 +653,8 @@ CRITICAL: You MUST call Write tool with file_path="{scope_file}" to save the sco
 
 ## Target Audience
 {state.expertise_level} level readers
-""")
+"""
+        scope_tmp = scope_file.with_suffix(".md.tmp")
+        scope_file.parent.mkdir(parents=True, exist_ok=True)
+        scope_tmp.write_text(minimal)
+        os.replace(scope_tmp, scope_file)

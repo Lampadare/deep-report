@@ -8,10 +8,16 @@ CRITICAL: Only shows metadata, NEVER reads research content.
 import json
 import os
 import queue
+import time
 from itertools import count
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
+
+
+def _utcnow_iso() -> str:
+    """Timezone-aware ISO timestamp for cross-host driver correlation."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 class _GateRejected(Exception):
@@ -105,11 +111,11 @@ class ApprovalGate:
             "gate_id": gate_id,
             "metadata": metadata,
             "status": "pending",
-            "requested_at": datetime.now().isoformat(),
+            "requested_at": _utcnow_iso(),
         }
         try:
             self.approval_file.parent.mkdir(parents=True, exist_ok=True)
-            self.approval_file.write_text(json.dumps(request, indent=2))
+            self._atomic_write_json(request)
         except Exception as e:
             ui.warning(f"Approval state saving failed: {e}")
 
@@ -217,11 +223,11 @@ class ApprovalGate:
                     if feedback:
                         request["status"] = "feedback"
                         request["feedback"] = feedback
-                        request["responded_at"] = datetime.now().isoformat()
+                        request["responded_at"] = _utcnow_iso()
                         try:
-                            self.approval_file.write_text(json.dumps(request, indent=2))
-                        except Exception:
-                            pass
+                            self._atomic_write_json(request)
+                        except Exception as e:
+                            ui.warning(f"Approval state save failed: {e}")
                         return feedback
                     ui.warning("Empty feedback, try again")
                     continue
@@ -241,11 +247,11 @@ class ApprovalGate:
 
         if response == 'q':
             request["status"] = "quit"
-            request["responded_at"] = datetime.now().isoformat()
+            request["responded_at"] = _utcnow_iso()
             try:
-                self.approval_file.write_text(json.dumps(request, indent=2))
-            except Exception:
-                pass
+                self._atomic_write_json(request)
+            except Exception as e:
+                ui.warning(f"Approval state save failed: {e}")
             if self.progress:
                 self.progress.approval_received(gate_id, False)
             raise KeyboardInterrupt("User quit at approval gate")
@@ -253,11 +259,11 @@ class ApprovalGate:
         approved = response != 's'
 
         request["status"] = "approved" if approved else "stopped_early"
-        request["responded_at"] = datetime.now().isoformat()
+        request["responded_at"] = _utcnow_iso()
         try:
-            self.approval_file.write_text(json.dumps(request, indent=2))
-        except Exception:
-            pass
+            self._atomic_write_json(request)
+        except Exception as e:
+            ui.warning(f"Approval state save failed: {e}")
 
         if self.progress:
             self.progress.approval_received(gate_id, approved)
@@ -343,7 +349,7 @@ class ApprovalGate:
 
         coverage = decision.get("coverage")
         gate_id = f"iteration_{iteration + 1}"
-        requested_at = datetime.now().isoformat()
+        requested_at = _utcnow_iso()
 
         # Machine-mode driven approval: skip the keyboard TUI, poll the file instead.
         # Approve = take all suggestions with default model. Stop_early = no follow-ups.
@@ -775,9 +781,15 @@ class ApprovalGate:
         Prevents readers from seeing a partial file mid-write. Raises if the
         write fails; callers MUST handle that — silently swallowing a failed
         approval write turns into a silent auto-approve of a paid gate.
+
+        Tmp file name includes PID + a monotonic suffix so multiple writers
+        sharing the same state directory (e.g., crash + resume, or two gates
+        firing back-to-back) cannot clobber each other's tmp file.
         """
         self.approval_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.approval_file.with_suffix(".tmp")
+        tmp = self.approval_file.with_suffix(
+            f".tmp.{os.getpid()}.{time.monotonic_ns()}"
+        )
         tmp.write_text(json.dumps(payload, indent=2))
         os.replace(tmp, self.approval_file)
 
@@ -801,8 +813,6 @@ class ApprovalGate:
           str = feedback text (only when allow_feedback)
           On timeout: emits a distinct approval_timeout event and returns False.
         """
-        import time
-
         seq = next(self._request_seq)
         request = {
             "gate_id": gate_id,
@@ -811,7 +821,7 @@ class ApprovalGate:
             "gate_type": gate_type,
             "allow_feedback": allow_feedback,
             "status": "pending",
-            "requested_at": datetime.now().isoformat(),
+            "requested_at": _utcnow_iso(),
             "response": None,  # explicit null — never inherit a prior gate's response
         }
         try:
@@ -834,13 +844,17 @@ class ApprovalGate:
             )
         except KeyboardInterrupt:
             # Persist a clear terminal state so the file isn't left "pending" forever.
+            # If even this save fails (disk full, path deleted), surface it — a silent
+            # failure here means the driver never learns the gate was interrupted.
             try:
                 current = json.loads(self.approval_file.read_text())
                 current["status"] = "interrupted"
-                current["responded_at"] = datetime.now().isoformat()
+                current["responded_at"] = _utcnow_iso()
                 self._atomic_write_json(current)
-            except Exception:
-                pass
+            except Exception as e:
+                ui.warning(f"Could not mark approval '{gate_id}' as interrupted: {e}")
+                if self.progress:
+                    self.progress.error(0, f"approval gate '{gate_id}' interrupted state save failed: {e}")
             if self.progress:
                 self.progress.approval_received(gate_id, False)
             raise
@@ -849,7 +863,6 @@ class ApprovalGate:
                            allow_feedback: bool, poll_secs: float,
                            timeout_secs: float) -> bool | str:
         """Inner poll loop. Extracted so KeyboardInterrupt handling is clean."""
-        import time
 
         deadline = time.monotonic() + timeout_secs
         consecutive_missing = 0
@@ -896,8 +909,8 @@ class ApprovalGate:
                 current["status"] = "resolved"
                 try:
                     self._atomic_write_json(current)
-                except Exception:
-                    pass
+                except Exception as e:
+                    ui.warning(f"Approval state save failed: {e}")
 
                 if allow_feedback and feedback:
                     return feedback
@@ -925,12 +938,12 @@ class ApprovalGate:
         if requested_at:
             request["requested_at"] = requested_at
         if status != "pending":
-            request["responded_at"] = datetime.now().isoformat()
+            request["responded_at"] = _utcnow_iso()
         try:
             self.approval_file.parent.mkdir(parents=True, exist_ok=True)
-            self.approval_file.write_text(json.dumps(request, indent=2))
-        except Exception:
-            pass
+            self._atomic_write_json(request)
+        except Exception as e:
+            ui.warning(f"Approval state save failed: {e}")
 
     def pre_synthesis_gate(self, state) -> bool:
         """Approval gate before synthesis (optional)."""

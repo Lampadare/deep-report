@@ -10,7 +10,7 @@ import json
 import os
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -42,16 +42,23 @@ class ProgressWriter:
         return time.time() - self.start_time
 
     def _write_event(self, event_type: str, data: dict):
-        """Write a JSON-lines event atomically.
+        """Write a JSON-lines event durably.
 
         fcntl.flock is advisory (writers cooperate) but readers like `tail -F`
-        don't honor it. To prevent a reader from observing a partial line if a
-        writer crashes mid-write, we build the full line in memory and do a
-        single os.write — atomic for any size up to PIPE_BUF (typically 4 KB,
-        which our events comfortably fit within).
+        don't honor it. We build the full line in memory and do a single
+        os.write inside the lock — POSIX guarantees write atomicity up to
+        PIPE_BUF (typically 4 KB). Long ``summary`` payloads or large
+        ``decision`` reasoning blobs can exceed this; in that case a concurrent
+        ``tail -F`` reader could briefly see a partial line. Drivers consuming
+        progress.jsonl should be JSONL-aware (skip lines that don't parse).
+
+        An ``os.fsync`` after the write ensures the entry survives a crash —
+        the JSONL stream is the machine-mode driver's only signal, so losing
+        the tail on a crash silently breaks the driver. The cost is one
+        fsync per event, which is fine for our event volumes.
         """
         event = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "elapsed_secs": round(self._elapsed_secs(), 2),
             "type": event_type,
             **data
@@ -60,14 +67,28 @@ class ProgressWriter:
         try:
             fd = os.open(self.progress_file,
                          os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        except OSError as e:
+            print(f"Warning: Could not open progress file: {e}")
+            return
+        # fd is owned by this function from here — close unconditionally.
+        try:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError as e:
+                print(f"Warning: Could not lock progress file: {e}")
+                return
+            try:
                 os.write(fd, line)
+                try:
+                    os.fsync(fd)
+                except OSError:
+                    pass  # fsync is best-effort; tmpfs / pipes don't support it
+            except OSError as e:
+                print(f"Warning: Could not write progress: {e}")
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
-        except OSError as e:
-            print(f"Warning: Could not write progress: {e}")
+        finally:
+            os.close(fd)
 
     def _write_legacy(self, line: str):
         """Write to legacy log format for backwards compatibility."""
