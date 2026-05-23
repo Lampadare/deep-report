@@ -35,7 +35,8 @@ import re
 import shutil
 import signal
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -1128,13 +1129,27 @@ def _handle_approve_subcommand(args) -> int:
 
     # Lock + read + validate + write atomically. Two racing --approve calls will
     # serialize on the lock; the second sees status="responded" and exits.
+    #
+    # The lock lives on a sidecar `.lock` file rather than on the data file
+    # itself, because we replace the data file via `os.replace` inside the
+    # critical section. A flock on the data file's fd points to the inode the
+    # fd was opened with — after `os.replace` swaps the inode, a second process
+    # could `flock` the stale inode in parallel and never see "responded".
+    # The sidecar's inode never changes, so the lock semantics survive.
+    lock_file = report_dir / "state" / "pending_approval.lock"
     try:
-        with open(approval_file, "r+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        with open(lock_file, "a+") as lockf:
+            fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
             try:
-                f.seek(0)
+                # Re-check existence under the lock (a concurrent run might
+                # have just resolved and removed the file).
+                if not approval_file.exists():
+                    print(f"error: no pending approval at {approval_file}",
+                          file=sys.stderr)
+                    return 2
+
                 try:
-                    request = loads(f.read())
+                    request = loads(approval_file.read_text())
                 except JSONDecodeError as e:
                     print(f"error: could not parse approval file: {e}",
                           file=sys.stderr)
@@ -1154,16 +1169,21 @@ def _handle_approve_subcommand(args) -> int:
                 request["response"] = {
                     "decision": args.decision,
                     "feedback": args.feedback or "",
-                    "responded_at": datetime.now().isoformat(),
+                    "responded_at": datetime.now(timezone.utc).isoformat(),
                 }
                 request["status"] = "responded"
 
-                # Atomic publish so the polling worker never reads a partial line.
-                tmp = approval_file.with_suffix(".tmp")
+                # Atomic publish so the polling worker never reads a partial
+                # line. PID + monotonic_ns suffix on the tmp so two writers
+                # can't trample each other (also belt-and-suspenders since the
+                # sidecar lock already serializes us).
+                tmp = approval_file.with_suffix(
+                    f".tmp.{os.getpid()}.{time.monotonic_ns()}"
+                )
                 tmp.write_text(dumps(request, indent=2))
                 os.replace(tmp, approval_file)
             finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
     except OSError as e:
         print(f"error: could not write approval response: {e}", file=sys.stderr)
         return 1

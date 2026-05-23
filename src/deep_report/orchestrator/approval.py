@@ -565,7 +565,14 @@ class ApprovalGate:
             hint.append("a/d all  ", "dim cyan")
             hint.append("S/O bulk model  ", "dim cyan")
             hint.append("+ custom  ", "dim magenta")
-            hint.append("Enter confirm  ", "dim green")
+            if sufficient:
+                # When the decision agent reports sufficient coverage, surface
+                # the stop-and-synthesize path prominently.
+                hint.append("Enter synthesize  ", "bold green")
+                hint.append("c continue research  ", "dim yellow")
+            else:
+                hint.append("Enter confirm  ", "dim green")
+                hint.append("x stop+synthesize  ", "dim yellow")
             hint.append("q quit", "dim red")
             items.append(Panel(
                 hint,
@@ -629,8 +636,25 @@ class ApprovalGate:
                         if r["approved"]:
                             r["model"] = "opus"
                 elif ch in ("\r", "\n"):
-                    action = "approve"
+                    # When the decision agent has already reported sufficient
+                    # coverage, Enter defaults to "stop and synthesize" so the
+                    # user doesn't accidentally pay for another iteration of
+                    # research. The "c" key remains available to continue.
+                    action = "stop" if sufficient else "approve"
                     break
+                elif ch == "x":
+                    # Explicit stop-and-synthesize on the not-yet-sufficient
+                    # path. Mirrors the plain-fallback's "s" key.
+                    if not sufficient:
+                        action = "stop"
+                        break
+                elif ch == "c":
+                    # Explicit "continue research" override on the sufficient
+                    # path — the user wants more research despite the agent
+                    # saying enough.
+                    if sufficient:
+                        action = "approve"
+                        break
                 elif ch == "q":
                     action = "quit"
                     break
@@ -809,9 +833,14 @@ class ApprovalGate:
 
         Returns:
           True = approved
-          False = stopped early
+          False = stopped early (driver says "synthesize what we have")
           str = feedback text (only when allow_feedback)
           On timeout: emits a distinct approval_timeout event and returns False.
+
+        Raises:
+          KeyboardInterrupt — driver decision == "reject". Distinct from
+            stop_early: reject means "abort, do not synthesize either",
+            matching the interactive "q" key semantics.
         """
         seq = next(self._request_seq)
         request = {
@@ -916,6 +945,12 @@ class ApprovalGate:
                     return feedback
                 if decision == "stop_early":
                     return False
+                if decision == "reject":
+                    # Distinct from stop_early: reject = "abort, do not
+                    # synthesize either". Mirrors the interactive 'q' key.
+                    raise KeyboardInterrupt(
+                        f"Driver rejected approval gate '{gate_id}'"
+                    )
                 return approved
 
             time.sleep(poll_secs)
