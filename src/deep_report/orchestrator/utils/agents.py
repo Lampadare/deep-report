@@ -81,8 +81,16 @@ AGENT_TOOLS = {
     ],
     "seed_processing": [
         "Read", "Write",
+        # WebFetch is always available — guarantees a fetch capability even
+        # if the user enabled an MCP stack without firecrawl/crawl4ai/playwright.
+        "WebFetch",
         "mcp__firecrawl__firecrawl_scrape",
         "mcp__crawl4ai__scrape",
+        # Playwright is a useful fallback for JS-heavy/anti-bot pages.
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_wait_for",
+        "mcp__playwright__browser_close",
     ],
     "seed_processing_fallback": [
         "Read", "Write", "WebSearch", "WebFetch",

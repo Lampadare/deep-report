@@ -404,8 +404,17 @@ def _process_seeds_via_agent(state: State, seeds: list[str]) -> bool:
         research_instructions = state.brief or state.topic
 
         if seed.startswith("http"):
+            # WebFetch is always allowed in seed_processing; the MCP scrape
+            # tools are best-effort additions for JS-heavy or anti-bot pages.
+            # Pick the prompt accordingly so the agent doesn't try a tool we
+            # didn't allow.
             if mcp_config:
-                fetch_steps = "1. Use mcp__firecrawl__firecrawl_scrape to get the URL content (or mcp__crawl4ai__scrape as backup)"
+                fetch_steps = (
+                    "1. Try mcp__firecrawl__firecrawl_scrape first; if it's not "
+                    "available or returns blank, fall back to "
+                    "mcp__playwright__browser_navigate+browser_snapshot (JS-heavy "
+                    "sites), mcp__crawl4ai__scrape, or finally WebFetch"
+                )
             else:
                 fetch_steps = "1. Use WebFetch to get the URL content"
             prompt = f"""TASK: Fetch URL and save content to file.
