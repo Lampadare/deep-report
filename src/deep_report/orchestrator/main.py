@@ -752,6 +752,9 @@ Examples:
   deep-report --resume ~/reports/quantum_20260207_1430
         """
     )
+    from .. import __version__
+    parser.add_argument("--version", action="version",
+                        version=f"deep-report {__version__}")
     parser.add_argument("topic", nargs="?", help="Research topic")
     parser.add_argument("--quick", action="store_true",
                         help="Skip interview, use sensible defaults")
@@ -810,6 +813,20 @@ Examples:
     parser.add_argument("--feedback", default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
+
+    # Reject interactive-only flags combined with --machine before running them.
+    if args.machine:
+        for flag_name, flag_value in (
+            ("--update", args.update),
+            ("--setup-skill", args.setup_skill),
+            ("--intro", args.intro),
+        ):
+            if flag_value:
+                print(
+                    f"error: {flag_name} is interactive and cannot be combined with --machine",
+                    file=sys.stderr,
+                )
+                return 2
 
     # Handle --update flag first
     if args.update:
@@ -1415,7 +1432,25 @@ def setup_skill() -> int:
                 # Different symlink, remove and recreate
                 skill_target.unlink()
         else:
-            ui.warning(f"Removing existing {skill_target}")
+            # Existing real directory — confirm before destroying.
+            ui.warning(f"{skill_target} exists as a directory (not a symlink).")
+            is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+            confirmed = False
+            if is_tty and QUESTIONARY_AVAILABLE:
+                try:
+                    confirmed = questionary.confirm(
+                        f"Delete {skill_target} and replace with symlink?",
+                        default=False,
+                        style=custom_style,
+                    ).ask()
+                except Exception:
+                    confirmed = False
+            if not confirmed:
+                ui.error(
+                    f"Refusing to remove existing directory {skill_target}. "
+                    "Move or delete it manually, then re-run --setup-skill."
+                )
+                return 1
             import shutil
             shutil.rmtree(skill_target)
 
@@ -1682,13 +1717,16 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
         state.save()
 
     # Set up verbose toggle (press 'v' during execution)
-    # Footer shows verbose indicator, so just toggle the flag
+    # Footer shows verbose indicator, so just toggle the flag.
+    # Skip in machine mode: no Rich Live, so the keyboard listener has nothing
+    # to redraw and would just consume stdin.
     def on_verbose_toggle(enabled: bool):
         ui.set_verbose(enabled)
 
     verbose_toggle = VerboseToggle(on_toggle=on_verbose_toggle)
-    verbose_toggle.start()
-    ui.attach_verbose_toggle(verbose_toggle)
+    if not ctx.machine_mode:
+        verbose_toggle.start()
+        ui.attach_verbose_toggle(verbose_toggle)
 
     phases = [
         (1, "Setup", lambda s: True),  # Already done if start_phase > 1
