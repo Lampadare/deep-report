@@ -74,6 +74,12 @@ else:
     custom_style = None
 
 
+def _reject_with_machine(flag: str) -> int:
+    """Stderr error for an interactive flag combined with --machine. Exit 2."""
+    print(f"error: {flag} is interactive and cannot be combined with --machine", file=sys.stderr)
+    return 2
+
+
 # Double Ctrl+C exits interview cleanly with no metadata saved
 import time as _time
 _last_interview_ctrlc = [0.0]
@@ -793,8 +799,16 @@ Examples:
                         help="Update deep-report to latest version from GitHub")
     parser.add_argument("--setup", action="store_true",
                         help="Run the interactive MCP setup wizard (pick which servers to enable, see API key costs)")
+    parser.add_argument("--setup-from-env", action="store_true",
+                        help="Auto-enable every MCP whose prereqs and required env vars are already set. Non-interactive.")
     parser.add_argument("--setup-skill", action="store_true",
                         help="Install Claude Code skill for /deep-report command")
+    parser.add_argument("--doctor", action="store_true",
+                        help="Per-MCP health check (prereqs, keys, signup URLs).")
+    parser.add_argument("--status", action="store_true",
+                        help="Show currently saved MCP config and per-spec key/prereq status.")
+    parser.add_argument("--print-catalog", action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--intro", action="store_true",
                         help="Show onboarding guide and example usage")
     parser.add_argument("--machine", action="store_true",
@@ -814,19 +828,42 @@ Examples:
 
     args = parser.parse_args()
 
+    # Load persisted keys from ~/.deep-report/keys.env into os.environ before any
+    # flag handler reads env vars (doctor, setup-from-env, status, etc.).
+    from .setup_wizard import load_keys_env
+    load_keys_env()
+
     # Reject interactive-only flags combined with --machine before running them.
-    if args.machine:
-        for flag_name, flag_value in (
-            ("--update", args.update),
-            ("--setup-skill", args.setup_skill),
-            ("--intro", args.intro),
-        ):
-            if flag_value:
-                print(
-                    f"error: {flag_name} is interactive and cannot be combined with --machine",
-                    file=sys.stderr,
-                )
-                return 2
+    if args.update and args.machine:
+        return _reject_with_machine("--update")
+    if args.setup_skill and args.machine:
+        return _reject_with_machine("--setup-skill")
+    if args.intro and args.machine:
+        return _reject_with_machine("--intro")
+    if args.setup and args.machine:
+        return _reject_with_machine("--setup")
+
+    # Handle --print-catalog (hidden flag, allowed always incl. --machine)
+    if args.print_catalog:
+        from .catalog_render import print_catalog
+        return print_catalog()
+
+    # Handle --doctor (allowed with --machine; doctor handles machine mode internally)
+    if args.doctor:
+        from .doctor import print_doctor
+        return print_doctor()
+
+    # Handle --setup-from-env (allowed with --machine; this IS the headless path)
+    if args.setup_from_env:
+        from .setup_wizard import save_config_from_env
+        cfg = save_config_from_env()
+        print(f"Enabled {len(cfg.get('enabled', []))} MCPs from environment.")
+        return 0
+
+    # Handle --status (allowed with --machine; emits JSON in machine mode)
+    if args.status:
+        from .setup_wizard import print_status
+        return print_status()
 
     # Handle --update flag first
     if args.update:
@@ -834,10 +871,6 @@ Examples:
 
     # Handle --setup (MCP wizard) before --setup-skill since users may confuse them
     if args.setup:
-        if args.machine:
-            print("error: --setup is interactive; not compatible with --machine",
-                  file=sys.stderr)
-            return 2
         from .setup_wizard import run_wizard
         return run_wizard()
 
@@ -906,17 +939,13 @@ Examples:
     # Handle --list flag (rejects in machine mode — picker requires a TTY)
     if args.list:
         if args.machine:
-            print("error: --machine is incompatible with --list (interactive picker)",
-                  file=sys.stderr)
-            return 2
+            return _reject_with_machine("--list")
         return list_and_resume(ctx)
 
     # Handle --delete flag (rejects in machine mode — picker requires a TTY)
     if args.delete:
         if args.machine:
-            print("error: --machine is incompatible with --delete (interactive picker)",
-                  file=sys.stderr)
-            return 2
+            return _reject_with_machine("--delete")
         return delete_report()
 
     # Machine mode: strict bypass — no questionary, no AI recommendations, no prompts.

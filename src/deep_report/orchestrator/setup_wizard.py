@@ -46,6 +46,7 @@ from .mcp_catalog import (
 from .ui import ui
 
 CONFIG_PATH = Path.home() / ".deep-report" / "mcp_config.json"
+KEYS_ENV_PATH = Path.home() / ".deep-report" / "keys.env"
 
 # Names we never import even if a user has them in CC — these are either already
 # in the catalog (catalog wins) or actively retired by deep-report.
@@ -312,6 +313,304 @@ def imported_servers() -> dict[str, dict]:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# API key persistence (keys.env)
+# ──────────────────────────────────────────────────────────────────────
+
+def _parse_keys_env_text(text: str) -> dict[str, str]:
+    """Parse KEY=VALUE lines from a keys.env-style blob. Tolerates blank lines,
+    ``# comment`` lines, and surrounding whitespace. Optional matching single or
+    double quotes around the value are stripped. Malformed lines are warned
+    about and skipped."""
+    result: dict[str, str] = {}
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            ui.warning(f"{KEYS_ENV_PATH}:{lineno}: ignoring malformed line (no '='): {raw!r}")
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            ui.warning(f"{KEYS_ENV_PATH}:{lineno}: ignoring line with empty key: {raw!r}")
+            continue
+        # Strip a matching pair of surrounding quotes if present.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        result[key] = value
+    return result
+
+
+def load_keys_env() -> None:
+    """Read ``KEYS_ENV_PATH`` (KEY=value lines, ``#`` comments OK) and apply each
+    entry to ``os.environ`` *only* when the variable is not already set —
+    existing environment values always win. Silently no-ops when the file is
+    missing; malformed lines are warned and skipped."""
+    if not KEYS_ENV_PATH.exists():
+        return
+    try:
+        text = KEYS_ENV_PATH.read_text()
+    except OSError as exc:
+        ui.warning(f"Cannot read {KEYS_ENV_PATH}: {exc}")
+        return
+    for key, value in _parse_keys_env_text(text).items():
+        if key not in os.environ:
+            os.environ[key] = value
+
+
+def persist_keys_to_env_file(keys: dict[str, str]) -> Path:
+    """Atomically write/merge ``keys`` into ``KEYS_ENV_PATH`` with mode 0o600.
+
+    If the file already exists, the existing keys are read and merged: any
+    keys passed in replace existing values for the same name, other keys are
+    preserved. Whitespace around keys and values is stripped, and entries with
+    an empty value are dropped. Returns ``KEYS_ENV_PATH``."""
+    parent = KEYS_ENV_PATH.parent
+    if parent.exists() and not parent.is_dir():
+        ui.error(
+            f"Cannot save API keys: {parent} exists but is not a directory. "
+            f"Move or remove it (e.g. `mv {parent} {parent}.bak`) and re-run `deep-report --setup`."
+        )
+        return KEYS_ENV_PATH
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        ui.error(f"Cannot create {parent}: {exc}")
+        return KEYS_ENV_PATH
+
+    # Start from existing on-disk keys so a merge preserves anything the user
+    # already pasted, then overlay the incoming dict.
+    merged: dict[str, str] = {}
+    if KEYS_ENV_PATH.exists():
+        try:
+            merged.update(_parse_keys_env_text(KEYS_ENV_PATH.read_text()))
+        except OSError as exc:
+            ui.warning(f"Cannot read existing {KEYS_ENV_PATH}: {exc} — overwriting.")
+            merged = {}
+
+    for raw_key, raw_value in keys.items():
+        if not isinstance(raw_key, str):
+            continue
+        key = raw_key.strip()
+        if not key:
+            continue
+        value = (raw_value if isinstance(raw_value, str) else "").strip()
+        if not value:
+            continue
+        merged[key] = value
+
+    header = (
+        "# deep-report API keys — sourced by `deep-report` on startup.\n"
+        "# Existing environment variables always win; entries here only fill gaps.\n"
+        "# Edit with care: this file is chmod 0600 and may contain secrets.\n"
+    )
+    body_lines = [f"{k}={v}" for k, v in sorted(merged.items())]
+    body = (header + "\n".join(body_lines) + ("\n" if body_lines else "")).encode("utf-8")
+
+    tmp = KEYS_ENV_PATH.with_suffix(f".tmp.{os.getpid()}.{time.monotonic_ns()}")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(body)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        os.replace(tmp, KEYS_ENV_PATH)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    try:
+        KEYS_ENV_PATH.chmod(0o600)
+    except OSError:
+        pass
+    return KEYS_ENV_PATH
+
+
+def prompt_for_missing_keys(enabled: set[str]) -> dict[str, str]:
+    """Prompt the user (one ``questionary.text`` per var) for any required env
+    vars that the enabled catalog specs need but ``os.environ`` lacks.
+
+    Returns a ``{VAR: value}`` dict of *non-empty* pasted values (skipped vars
+    are dropped). Silently returns ``{}`` when stdin/stdout aren't a TTY or
+    when ``questionary`` isn't importable."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return {}
+    try:
+        import questionary as _q  # local import keeps headless paths free
+    except ImportError:
+        return {}
+
+    # Deduplicate while preserving spec order so prompts come in catalog order.
+    asked: list[tuple[str, MCPSpec]] = []
+    seen: set[str] = set()
+    for spec in CATALOG:
+        if spec.key not in enabled:
+            continue
+        for var in spec.required_env:
+            if var in os.environ or var in seen:
+                continue
+            seen.add(var)
+            asked.append((var, spec))
+
+    collected: dict[str, str] = {}
+    for var, spec in asked:
+        signup = spec.key_signup_url or "see provider docs"
+        prompt = f"Paste {var} (or Enter to skip — sign up: {signup})"
+        try:
+            answer = _q.text(prompt).ask()
+        except (KeyboardInterrupt, EOFError):
+            break
+        if answer is None:
+            # User hit Ctrl+C inside questionary — stop prompting further keys.
+            break
+        value = answer.strip()
+        if value:
+            collected[var] = value
+    return collected
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Headless save + status
+# ──────────────────────────────────────────────────────────────────────
+
+def save_config_from_env() -> dict:
+    """Auto-enable every catalog spec that is runnable on this host *and* has
+    every ``required_env`` var already set in ``os.environ``. Calls
+    :func:`save_config` with the resulting selection and returns the payload
+    that was written."""
+    prereqs = detect_prereqs()
+    selected: list[str] = []
+    for spec in CATALOG:
+        runnable, _ = _spec_runnable(spec, prereqs)
+        if not runnable:
+            continue
+        miss_req, _ = _spec_env_status(spec)
+        if miss_req:
+            continue
+        selected.append(spec.key)
+    save_config(sorted(selected))
+    cfg = load_config() or {
+        "version": 2,
+        "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "enabled": sorted(selected),
+    }
+    return cfg
+
+
+def status_report() -> dict:
+    """Snapshot the saved config plus computed runtime status for each enabled
+    server. Returns sane defaults (empty lists, ``None`` fields) when no config
+    has been saved yet — never raises."""
+    cfg = load_config() or {}
+    prereqs = detect_prereqs()
+    enabled = enabled_keys() or set()
+    imported = imported_servers()
+
+    enabled_entries: list[dict] = []
+    unset_keys: list[str] = []
+    seen_unset: set[str] = set()
+    for spec in CATALOG:
+        if spec.key not in enabled:
+            continue
+        runnable, reason = _spec_runnable(spec, prereqs)
+        miss_req, _ = _spec_env_status(spec)
+        enabled_entries.append({
+            "key": spec.key,
+            "display_name": spec.display_name,
+            "tier": spec.tier,
+            "prereq_ok": runnable,
+            "prereq_reason": reason or None,
+            "env_ok": not miss_req,
+            "missing_env": list(miss_req),
+        })
+        for var in miss_req:
+            if var not in seen_unset:
+                seen_unset.add(var)
+                unset_keys.append(var)
+
+    imported_entries: list[dict] = []
+    for name, blk in sorted(imported.items()):
+        imported_entries.append({
+            "name": name,
+            "type": blk.get("type", "stdio"),
+            "summary": _summarize_cc_entry(blk),
+        })
+
+    return {
+        "config_path": str(CONFIG_PATH),
+        "config_version": cfg.get("version") if isinstance(cfg, dict) else None,
+        "saved_at": cfg.get("saved_at") if isinstance(cfg, dict) else None,
+        "enabled": enabled_entries,
+        "imported": imported_entries,
+        "unset_keys_for_enabled": unset_keys,
+        "keys_env_path": str(KEYS_ENV_PATH) if KEYS_ENV_PATH.exists() else None,
+    }
+
+
+def print_status() -> int:
+    """Render :func:`status_report` for humans (Rich panel) or for machines
+    (single JSON line on stdout when ``ui`` is in machine mode). Always
+    returns 0 — read the dict yourself if you need richer signalling."""
+    report = status_report()
+    if getattr(ui, "_machine_mode", False):
+        print(json.dumps(report))
+        return 0
+
+    ui.header("deep-report MCP status")
+    if not report["saved_at"]:
+        ui.warning(
+            f"No saved config at {report['config_path']} — run `deep-report --setup` "
+            "(or set API keys + start a run; first-run auto-saves a config)."
+        )
+        return 0
+
+    ui.info(f"Config:   {report['config_path']}")
+    ui.info(f"Version:  {report['config_version']}")
+    ui.info(f"Saved at: {report['saved_at']}")
+    if report["keys_env_path"]:
+        ui.info(f"Keys env: {report['keys_env_path']}  (chmod 0600)")
+    else:
+        ui.info("Keys env: (none — paste keys with --setup to create one)")
+
+    ui.header("Enabled servers")
+    if not report["enabled"]:
+        ui.warning("No servers enabled — deep-report will fall back to built-in WebSearch/WebFetch.")
+    else:
+        for entry in report["enabled"]:
+            tier_badge = TIER_BADGE.get(entry["tier"], entry["tier"].upper())
+            if entry["env_ok"] and entry["prereq_ok"]:
+                state = "ready"
+            elif not entry["prereq_ok"]:
+                state = f"blocked ({entry['prereq_reason']})"
+            else:
+                state = f"missing {', '.join(entry['missing_env'])}"
+            ui.info(f"  • {entry['display_name']}  [{tier_badge}]  — {state}")
+
+    if report["imported"]:
+        ui.header("Imported from Claude Code")
+        for entry in report["imported"]:
+            ui.info(f"  • {entry['name']}  — {entry['summary']}")
+
+    if report["unset_keys_for_enabled"]:
+        ui.header("Action required")
+        ui.warning("These environment variables are missing for enabled servers:")
+        for var in report["unset_keys_for_enabled"]:
+            ui.info(f"  - {var}")
+        ui.info(
+            "\nPaste them with `deep-report --setup`, or add them to your shell rc "
+            f"or {KEYS_ENV_PATH}."
+        )
+    return 0
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Wizard
 # ──────────────────────────────────────────────────────────────────────
 
@@ -455,6 +754,14 @@ def run_wizard() -> int:
     imported_to_save = {name: cfg for name, cfg in cc_imports.items() if name in enabled}
     path = save_config(sorted(enabled), imported=imported_to_save or None)
     ui.success(f"Saved to {path}")
+
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        collected = prompt_for_missing_keys(enabled)
+        if collected:
+            persist_keys_to_env_file(collected)
+            for k, v in collected.items():
+                os.environ[k] = v  # apply for current process
+            ui.success(f"Saved {len(collected)} API keys to {KEYS_ENV_PATH} (0o600).")
 
     _print_summary(enabled)
     if imported_to_save:
