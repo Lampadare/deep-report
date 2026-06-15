@@ -1,10 +1,9 @@
 """Render :data:`mcp_catalog.CATALOG` as the README-facing MCP table.
 
-The README's "What MCPs are available" section uses a 3-column markdown table.
-This module is the single source of truth for that table — running
-``deep-report --print-catalog`` (or invoking :func:`render_catalog_markdown`)
-yields the exact text that should live in the README. Phase 4 will replace
-the hand-maintained README block with the output of this renderer.
+The README's "What MCPs are available" section uses a 4-column markdown table
+(MCP, Needs, Tier, What it does). This module is the single source of truth —
+running ``deep-report --print-catalog`` yields the exact text that should
+live in the README between the ``<!-- CATALOG-TABLE:START -->`` markers.
 """
 from __future__ import annotations
 
@@ -32,6 +31,21 @@ def _readme_name(spec: MCPSpec) -> str:
     return _PAREN_SUFFIX.sub("", spec.display_name).strip()
 
 
+def _needs_phrase(spec: MCPSpec) -> str:
+    """Human-readable runtime requirement for the README's "Needs" column.
+
+    Concatenates flagged runtimes; HTTP-only specs show an em dash.
+    """
+    parts: list[str] = []
+    if spec.requires_node:
+        parts.append("Node")
+    if spec.requires_uv:
+        parts.append("Python+uv")
+    if spec.requires_docker:
+        parts.append("Docker")
+    return " + ".join(parts) if parts else "—"
+
+
 def _tier_phrase(spec: MCPSpec) -> str:
     """Human-readable tier phrase for the README's "Tier" column.
 
@@ -52,18 +66,19 @@ def _tier_phrase(spec: MCPSpec) -> str:
 def render_catalog_markdown() -> str:
     """Render the CATALOG as the README's MCP table.
 
-    Returns a 3-column markdown table (``| MCP | Tier | What it does |``)
+    Returns a 4-column markdown table (``| MCP | Needs | Tier | What it does |``)
     in :data:`CATALOG` order — stable and deterministic. No trailing newline.
     """
     lines = [
-        "| MCP | Tier | What it does |",
-        "|---|---|---|",
+        "| MCP | Needs | Tier | What it does |",
+        "|---|---|---|---|",
     ]
     for spec in CATALOG:
         name = _readme_name(spec)
+        needs = _needs_phrase(spec)
         tier = _tier_phrase(spec)
         desc = spec.short_desc or spec.summary
-        lines.append(f"| **{name}** | {tier} | {desc} |")
+        lines.append(f"| **{name}** | {needs} | {tier} | {desc} |")
     return "\n".join(lines)
 
 

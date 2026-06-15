@@ -70,7 +70,7 @@ def test_drift_update_rewrites(drift_script, monkeypatch, tmp_path, capsys):
     assert rc == 0
 
     rewritten = fake_readme.read_text(encoding="utf-8")
-    assert "| MCP | Tier | What it does |" in rewritten
+    assert "| MCP | Needs | Tier | What it does |" in rewritten
     assert "this | is | stale" not in rewritten
     # markers preserved
     assert "<!-- CATALOG-TABLE:START" in rewritten
