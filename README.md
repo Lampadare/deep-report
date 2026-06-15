@@ -12,7 +12,7 @@ into a single, citation-grounded report (typically 15–30k words).
 pipx install deep-report
 ```
 
-Requires Python 3.10+ and [Claude Code](https://claude.ai/download) installed
+Requires Python 3.11+ and [Claude Code](https://claude.ai/download) installed
 and authenticated.
 
 ## Use
