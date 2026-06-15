@@ -93,6 +93,10 @@ class DeepReportUI:
         self._live = None
         self._task_id = None
         self._verbose = False
+        # Machine mode: silent file-coordinated worker for skill/agent drivers.
+        # No Rich Live displays, no questionary, no input(). State flows
+        # through state/progress.jsonl and state/pending_approval.json.
+        self._machine_mode = False
         # Plain mode progress tracking
         self._plain_total = 0
         self._plain_completed = 0
@@ -180,6 +184,17 @@ class DeepReportUI:
         if enabled and was_off:
             self._replay_log_buffer()
 
+    def set_machine_mode(self, enabled: bool):
+        """Enable machine mode: suppress Rich Live displays, ANSI escapes.
+
+        Plain stdout still works (header/step/info/phase_start/complete go to stdout
+        line-by-line). Structured state lives in state/progress.jsonl.
+        """
+        self._machine_mode = enabled
+        if enabled and RICH_AVAILABLE and self.console is not None:
+            # Force plain output: no color, no styled spinners, no TTY-detected truncation.
+            self.console = Console(force_terminal=False, no_color=True, highlight=False)
+
     @property
     def verbose_enabled(self) -> bool:
         """Check if verbose mode is enabled."""
@@ -249,13 +264,23 @@ class DeepReportUI:
 
     def _update_title(self, text: str):
         """Update terminal window title."""
-        if sys.stdout.isatty():
-            sys.stdout.write(f"\033]0;{text}\007")
-            sys.stdout.flush()
+        # Machine-mode contract: no ANSI on stdout. Skip even if a driver
+        # happens to attach a pty (making isatty() True).
+        if self._machine_mode or not sys.stdout.isatty():
+            return
+        sys.stdout.write(f"\033]0;{text}\007")
+        sys.stdout.flush()
 
     def header(self, title: str, subtitle: str = ""):
         """Print a styled header."""
         display_title = self._truncate(title, 80)
+        if self._machine_mode:
+            # Plain one-liner so machine-mode stdout stays parseable.
+            # Anchored grep on ^REPORT_DIR= still wins; we just remove visual noise.
+            print(f"[deep-report] {display_title}")
+            if subtitle:
+                print(f"[deep-report] mode={subtitle}")
+            return
         if RICH_AVAILABLE:
             self.console.print()
             self.console.print(Panel(
@@ -273,6 +298,9 @@ class DeepReportUI:
 
     def interview_header(self):
         """Show colorful banner for configure mode."""
+        # Machine mode never clears the screen — the driver consumes stdout.
+        if self._machine_mode:
+            return
         if RICH_AVAILABLE:
             if sys.stdout.isatty():
                 self.console.clear()
@@ -318,6 +346,9 @@ class DeepReportUI:
         icon = PHASE_ICONS.get(phase, "▶")
         self._update_title(f"deep-report: Phase {phase}/5 — {name}")
 
+        if self._machine_mode:
+            print(f"[phase {phase}/5] {name}: starting")
+            return
         if RICH_AVAILABLE:
             color = theme.phase_colors[(phase - 1) % len(theme.phase_colors)]
             self.console.print()
@@ -332,6 +363,11 @@ class DeepReportUI:
         if self._phase_start_time:
             elapsed = f" ({format_duration(time.time() - self._phase_start_time)})"
 
+        if self._machine_mode:
+            print(f"[phase {phase}/5] {name}: complete{elapsed}")
+            if phase == 5:
+                self._update_title("deep-report: Complete")
+            return
         if RICH_AVAILABLE:
             self.console.rule(style=theme.dim)
             self.console.print(f"[bold {theme.success}]✓[/] Phase {phase} ({name}) complete{elapsed}")
@@ -388,7 +424,7 @@ class DeepReportUI:
 
     def start_session(self):
         """Start persistent session Live display with footer bar."""
-        if not RICH_AVAILABLE:
+        if not RICH_AVAILABLE or self._machine_mode:
             return
         if self._footer_live:
             return
@@ -525,6 +561,10 @@ class DeepReportUI:
 
     def config_summary(self, config: dict):
         """Display configuration summary as a table."""
+        if self._machine_mode:
+            for key, value in config.items():
+                print(f"[config] {key}={value}")
+            return
         if RICH_AVAILABLE:
             table = Table(show_header=False, box=None, padding=(0, 2))
             table.add_column("Key", style=f"{theme.dim} {theme.accent}")
@@ -543,6 +583,10 @@ class DeepReportUI:
     @contextmanager
     def show_loading(self, message: str):
         """Show animated spinner during loading."""
+        if self._machine_mode:
+            print(f"  -> {message}")
+            yield
+            return
         if RICH_AVAILABLE and self._footer_live:
             spinner = Spinner("dots", text=f"[{theme.accent}]{message}[/]")
             self._active_content = lambda: spinner
@@ -560,6 +604,11 @@ class DeepReportUI:
 
     def agent_progress_start(self, total: int, description: str = "Spawning agents"):
         """Start agent progress tracking with enhanced visuals."""
+        if self._machine_mode:
+            print(f"{description} (0/{total})...")
+            self._plain_total = total
+            self._plain_completed = 0
+            return
         if RICH_AVAILABLE:
             try:
                 self._progress = Progress(
@@ -616,6 +665,10 @@ class DeepReportUI:
     @contextmanager
     def spinner_task(self, message: str):
         """Show spinner during a single long task."""
+        if self._machine_mode:
+            print(f"  {message}...")
+            yield
+            return
         if RICH_AVAILABLE and self._footer_live:
             spinner = Spinner("dots", text=f"[{theme.accent}]{message}[/]")
             self._active_content = lambda: spinner
@@ -643,7 +696,7 @@ class DeepReportUI:
         self._research_title = title
         self._research_start_time = time.monotonic()
 
-        if not RICH_AVAILABLE:
+        if not RICH_AVAILABLE or self._machine_mode:
             print(f"\n{title}")
             return
 
@@ -1002,6 +1055,13 @@ class DeepReportUI:
         Returns:
             Path to selected report, or None if cancelled
         """
+        # Machine mode has no interactive driver attached to stdin — bail
+        # before any questionary or input() call could hang the process.
+        # Write to stderr so we don't pollute the machine-mode stdout contract.
+        if self._machine_mode:
+            print("error: report_picker is interactive — not available in --machine mode",
+                  file=sys.stderr)
+            return None
         from pathlib import Path
         from datetime import datetime
 
@@ -1082,6 +1142,13 @@ class DeepReportUI:
         Returns:
             Path to selected report, or None if cancelled
         """
+        # Machine mode has no driver hooked to stdin — bail before any
+        # interactive call (questionary or input()) can hang the process.
+        # Write to stderr so we don't pollute the machine-mode stdout contract.
+        if self._machine_mode:
+            print("error: report_picker_for_delete is interactive — not available in --machine mode",
+                  file=sys.stderr)
+            return None
         from pathlib import Path
         from datetime import datetime
 

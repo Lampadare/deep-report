@@ -30,10 +30,13 @@ Options:
 """
 
 import argparse
+import os
 import re
 import shutil
 import signal
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -565,8 +568,10 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
     # ─── Step 2: Research Settings ───
     ui.step("Step 2/4 — Research Configuration")
 
-    # Agent count - use AI recommendation if available
-    agent_default = defaults.get('agents', 10)
+    # Agent count - use AI recommendation if available. `defaults.get('agents')`
+    # can be `None` when no --agents flag was passed; coerce to 10 so the
+    # interactive prompt doesn't receive a None default.
+    agent_default = defaults.get('agents') or 10
     if recs and isinstance(recs.get("agent_count"), int):
         rec_agents = max(3, min(recs["agent_count"], 30))
         agent_default = rec_agents
@@ -695,9 +700,11 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
 # Global context for phases
 class OrchestratorContext:
     """Shared context across all phases."""
-    def __init__(self, interactive: bool = False, verbose: bool = False):
+    def __init__(self, interactive: bool = False, verbose: bool = False,
+                 machine_mode: bool = False):
         self.interactive = interactive
         self.verbose = verbose
+        self.machine_mode = machine_mode
         self.progress: Optional[ProgressWriter] = None
         self.approval: Optional[ApprovalGate] = None
         self.intervention: Optional[InterventionHandler] = None
@@ -705,7 +712,19 @@ class OrchestratorContext:
     def init_for_report(self, report_dir: Path):
         """Initialize context objects for a report."""
         self.progress = ProgressWriter(report_dir)
-        self.approval = ApprovalGate(report_dir, self.interactive, self.progress)
+        # Approval mode:
+        #   --machine + --interactive → "file" (poll pending_approval.json)
+        #   --machine alone            → "auto" (skip gates, like non-interactive)
+        #   default                    → "stdin" if interactive else "auto"
+        if self.machine_mode and self.interactive:
+            approval_mode = "file"
+        elif self.interactive:
+            approval_mode = "stdin"
+        else:
+            approval_mode = "auto"
+        self.approval = ApprovalGate(
+            report_dir, self.interactive, self.progress, approval_mode=approval_mode
+        )
         self.intervention = InterventionHandler(report_dir, self.progress, self.interactive)
         # Set verbose mode on global UI
         ui.set_verbose(self.verbose)
@@ -726,10 +745,16 @@ Examples:
   # Pre-fill interview with specific values
   deep-report "Quantum computing" --agents 15 --model opus
 
+  # Machine mode - silent worker for skills/agents, state in progress.jsonl
+  deep-report "Quantum computing" --machine --name quantum-computing
+
   # Resume interrupted report
   deep-report --resume ~/reports/quantum_20260207_1430
         """
     )
+    from .. import __version__
+    parser.add_argument("--version", action="version",
+                        version=f"deep-report {__version__}")
     parser.add_argument("topic", nargs="?", help="Research topic")
     parser.add_argument("--quick", action="store_true",
                         help="Skip interview, use sensible defaults")
@@ -766,16 +791,55 @@ Examples:
                         help="Show per-agent progress, timing, retries, and error details")
     parser.add_argument("--update", action="store_true",
                         help="Update deep-report to latest version from GitHub")
+    parser.add_argument("--setup", action="store_true",
+                        help="Run the interactive MCP setup wizard (pick which servers to enable, see API key costs)")
     parser.add_argument("--setup-skill", action="store_true",
                         help="Install Claude Code skill for /deep-report command")
     parser.add_argument("--intro", action="store_true",
                         help="Show onboarding guide and example usage")
+    parser.add_argument("--machine", action="store_true",
+                        help="Run as silent file-coordinated worker for skills/agents. "
+                             "No Rich Live, no questionary, no input(). State flows through "
+                             "state/progress.jsonl and state/pending_approval.json.")
+    parser.add_argument("--name", default=None,
+                        help="Short name for report folder/headers. "
+                             "Required in --machine mode when topic > 100 chars.")
+    # Approval subcommand: deep-report --approve --report-dir <dir> --gate <id>
+    parser.add_argument("--approve", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--report-dir", help=argparse.SUPPRESS)
+    parser.add_argument("--gate", help=argparse.SUPPRESS)
+    parser.add_argument("--decision", choices=["approve", "reject", "stop_early"],
+                        default="approve", help=argparse.SUPPRESS)
+    parser.add_argument("--feedback", default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
+
+    # Reject interactive-only flags combined with --machine before running them.
+    if args.machine:
+        for flag_name, flag_value in (
+            ("--update", args.update),
+            ("--setup-skill", args.setup_skill),
+            ("--intro", args.intro),
+        ):
+            if flag_value:
+                print(
+                    f"error: {flag_name} is interactive and cannot be combined with --machine",
+                    file=sys.stderr,
+                )
+                return 2
 
     # Handle --update flag first
     if args.update:
         return update_cli()
+
+    # Handle --setup (MCP wizard) before --setup-skill since users may confuse them
+    if args.setup:
+        if args.machine:
+            print("error: --setup is interactive; not compatible with --machine",
+                  file=sys.stderr)
+            return 2
+        from .setup_wizard import run_wizard
+        return run_wizard()
 
     # Handle --setup-skill flag
     if args.setup_skill:
@@ -785,20 +849,88 @@ Examples:
     if args.intro:
         return show_intro()
 
+    # Handle --approve subcommand: write approval response and exit
+    if args.approve:
+        return _handle_approve_subcommand(args)
+
+    # First-run onboarding: if the user has never configured MCPs, walk them
+    # through the wizard before kicking off a report. Skip for paths that don't
+    # need MCPs at all (--list, --delete, --resume) and for non-interactive
+    # contexts (--machine or no TTY — those fall back to env-var-only discovery).
+    if not args.machine and not args.list and not args.delete and not args.resume:
+        from .setup_wizard import CONFIG_PATH, run_wizard
+        if (not CONFIG_PATH.exists()
+                and sys.stdin.isatty()
+                and sys.stdout.isatty()):
+            ui.info("")
+            ui.info("First run detected — let's pick which MCP servers you want to use.")
+            ui.info("(deep-report drives external search/papers/scrape MCPs to research"
+                    " your topic. Nothing is pre-selected; you choose what's on.)")
+            ui.info("Run `deep-report --setup` any time to change this.")
+            ui.info("")
+            try:
+                rc = run_wizard()
+            except Exception as e:
+                ui.warning(f"Setup wizard failed ({e}) — continuing with built-in"
+                           " WebSearch/WebFetch fallback only.")
+                rc = 1
+            if rc != 0:
+                ui.warning("Setup did not complete — continuing with built-in"
+                           " WebSearch/WebFetch fallback only.")
+                ui.info("Run `deep-report --setup` later to configure.")
+                # Fail-closed: persist an empty config so the runtime discovery
+                # doesn't silently re-enable every detectable MCP. Without
+                # this, `enabled_keys()` returns None ⇒ "no config, include
+                # everything", which contradicts the user's cancellation.
+                try:
+                    from .setup_wizard import save_config
+                    save_config([], imported=None)
+                except Exception as e:
+                    ui.warning(f"Could not persist empty config: {e}")
+
+    # Machine mode: silent worker. Activate before any UI calls.
+    if args.machine:
+        ui.set_machine_mode(True)
+
     # Create context
-    ctx = OrchestratorContext(interactive=args.interactive, verbose=args.verbose)
+    ctx = OrchestratorContext(
+        interactive=args.interactive,
+        verbose=args.verbose,
+        machine_mode=args.machine,
+    )
 
     # Handle resume case
     if args.resume:
         return resume_report(Path(args.resume), ctx)
 
-    # Handle --list flag
+    # Handle --list flag (rejects in machine mode — picker requires a TTY)
     if args.list:
+        if args.machine:
+            print("error: --machine is incompatible with --list (interactive picker)",
+                  file=sys.stderr)
+            return 2
         return list_and_resume(ctx)
 
-    # Handle --delete flag
+    # Handle --delete flag (rejects in machine mode — picker requires a TTY)
     if args.delete:
+        if args.machine:
+            print("error: --machine is incompatible with --delete (interactive picker)",
+                  file=sys.stderr)
+            return 2
         return delete_report()
+
+    # Machine mode: strict bypass — no questionary, no AI recommendations, no prompts.
+    # Validate inputs and run with flag-derived config.
+    if args.machine:
+        if not args.topic:
+            print("error: --machine requires a topic", file=sys.stderr)
+            return 2
+        if len(args.topic) > 100 and not args.name:
+            print("error: --machine requires --name when topic is over 100 chars",
+                  file=sys.stderr)
+            return 2
+        config = _build_machine_config(args)
+        return run_new_report(config, ctx)
 
     # If no topic, check for unfinished reports to resume
     if not args.topic:
@@ -937,6 +1069,146 @@ Examples:
 
 
 
+def _build_machine_config(args) -> dict:
+    """Build a run config from flags only — no prompts, no AI recommendations.
+
+    Used by --machine to skip questionary, the AI topic analyzer, and any input() fallback.
+    Defaults mirror --quick's hardcoded values; the AI recommendation layer is skipped on
+    purpose to keep the run deterministic and fast for agent drivers.
+    """
+    topic = args.topic
+    brief = ""
+    # Long-topic handling: --name supplies the short form, full topic becomes the brief.
+    if args.name:
+        brief = topic
+        topic = args.name
+
+    # Parse seed refs (same logic as --quick path)
+    seed_urls = []
+    seed_folder = None
+    if args.refs:
+        if args.refs.startswith("http"):
+            seed_urls = [u.strip() for u in args.refs.split(",")]
+        elif Path(args.refs).is_dir():
+            seed_folder = args.refs
+
+    return {
+        "topic": topic,
+        "brief": brief,
+        "model": args.model or "sonnet",
+        "agent_count": args.agents if args.agents is not None else 10,
+        "seed_urls": seed_urls,
+        "seed_refs_folder": seed_folder,
+        "download_papers": args.download_papers,
+        "generate_audio": args.audio,
+        "expertise_level": args.expertise or "intermediate",
+        "report_type": args.report_type or "deep-dive",
+        "report_dir": args.output,
+        "cwd": args.cwd,
+        "interactive": args.interactive,
+    }
+
+
+def _handle_approve_subcommand(args) -> int:
+    """Write an approval response to state/pending_approval.json.
+
+    The running --machine CLI polls this file; writing a `response` block releases the gate.
+
+    Hardened against:
+      - empty/whitespace gate or report_dir
+      - path traversal (--report-dir resolved + sanity-checked for state/manifest.json)
+      - racing --approve invocations (fcntl.flock around read+write)
+      - re-approval of an already-resolved gate (status checked under the lock)
+      - partial reads (atomic publish via os.replace)
+    """
+    import fcntl
+    from json import loads, dumps, JSONDecodeError
+
+    if not args.report_dir or not args.gate or not args.gate.strip():
+        print("error: --approve requires --report-dir and --gate", file=sys.stderr)
+        return 2
+
+    # Resolve and sanity-check the report dir. We require manifest.json — it's
+    # written by setup.py for every report, so its presence is a cheap
+    # "yes this is actually a deep-report report dir" check that blocks
+    # path-traversal targets like /etc/passwd.
+    report_dir = Path(args.report_dir).expanduser().resolve()
+    manifest = report_dir / "state" / "manifest.json"
+    if not manifest.exists():
+        print(f"error: not a deep-report directory (no manifest.json at {manifest})",
+              file=sys.stderr)
+        return 2
+
+    approval_file = report_dir / "state" / "pending_approval.json"
+    if not approval_file.exists():
+        print(f"error: no pending approval at {approval_file}", file=sys.stderr)
+        return 2
+
+    # Lock + read + validate + write atomically. Two racing --approve calls will
+    # serialize on the lock; the second sees status="responded" and exits.
+    #
+    # The lock lives on a sidecar `.lock` file rather than on the data file
+    # itself, because we replace the data file via `os.replace` inside the
+    # critical section. A flock on the data file's fd points to the inode the
+    # fd was opened with — after `os.replace` swaps the inode, a second process
+    # could `flock` the stale inode in parallel and never see "responded".
+    # The sidecar's inode never changes, so the lock semantics survive.
+    lock_file = report_dir / "state" / "pending_approval.lock"
+    try:
+        with open(lock_file, "a+") as lockf:
+            fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+            try:
+                # Re-check existence under the lock (a concurrent run might
+                # have just resolved and removed the file).
+                if not approval_file.exists():
+                    print(f"error: no pending approval at {approval_file}",
+                          file=sys.stderr)
+                    return 2
+
+                try:
+                    request = loads(approval_file.read_text())
+                except JSONDecodeError as e:
+                    print(f"error: could not parse approval file: {e}",
+                          file=sys.stderr)
+                    return 2
+
+                if request.get("gate_id") != args.gate:
+                    print(f"error: gate mismatch — file has "
+                          f"'{request.get('gate_id')}', got '{args.gate}'",
+                          file=sys.stderr)
+                    return 2
+
+                if request.get("status") in ("responded", "resolved"):
+                    print(f"error: gate '{args.gate}' is no longer pending "
+                          f"(status={request.get('status')})", file=sys.stderr)
+                    return 2
+
+                request["response"] = {
+                    "decision": args.decision,
+                    "feedback": args.feedback or "",
+                    "responded_at": datetime.now(timezone.utc).isoformat(),
+                }
+                request["status"] = "responded"
+
+                # Atomic publish so the polling worker never reads a partial
+                # line. PID + monotonic_ns suffix on the tmp so two writers
+                # can't trample each other (also belt-and-suspenders since the
+                # sidecar lock already serializes us).
+                tmp = approval_file.with_suffix(
+                    f".tmp.{os.getpid()}.{time.monotonic_ns()}"
+                )
+                tmp.write_text(dumps(request, indent=2))
+                os.replace(tmp, approval_file)
+            finally:
+                fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
+    except OSError as e:
+        print(f"error: could not write approval response: {e}", file=sys.stderr)
+        return 1
+
+    print(f"approval {args.decision} written for gate '{args.gate}'")
+    return 0
+
+
 def _check_auth():
     """Probe Claude CLI auth. Warns on failure, never blocks."""
     from ..cli import check_claude_auth
@@ -963,10 +1235,32 @@ def run_new_report(config: dict, ctx: OrchestratorContext) -> int:
     # Initialize state (will be saved after setup)
     state = State()
 
-    # Phase 1: Setup
+    # Phase 1: Setup. (REPORT_DIR= is emitted inside run_setup, immediately after
+    # the path is determined, so machine-mode drivers see it as the first
+    # parseable stdout line.)
     ui.phase_start(1, "Setup")
-    if not run_setup(state, config):
+    setup_ok = False
+    try:
+        setup_ok = run_setup(state, config)
+    except BaseException as e:
+        # Initialize a minimal progress writer if we have a report_dir, so the
+        # failure is observable in progress.jsonl.
+        if state.report_dir:
+            try:
+                ctx.init_for_report(Path(state.report_dir))
+                ctx.progress.report_failed(1, f"setup crashed: {e}", exit_code=1)
+            except Exception:
+                pass
+        raise
+
+    if not setup_ok:
         ui.error("Setup failed. Check the error messages above for details.")
+        if state.report_dir:
+            try:
+                ctx.init_for_report(Path(state.report_dir))
+                ctx.progress.report_failed(1, "setup returned False", exit_code=1)
+            except Exception:
+                pass
         return 1
     ui.phase_complete(1, "Setup")
 
@@ -978,8 +1272,24 @@ def run_new_report(config: dict, ctx: OrchestratorContext) -> int:
     # Transition message
     ui.info("Setup complete — decomposing into research threads...")
 
-    # Continue with remaining phases
-    result = continue_from_phase(state, 2, ctx)
+    # Continue with remaining phases. Wrap in try/finally so machine-mode drivers
+    # tailing progress.jsonl always see a terminal event (report_ready or
+    # report_failed) regardless of crash/abort path.
+    try:
+        result = continue_from_phase(state, 2, ctx)
+    except KeyboardInterrupt:
+        if ctx.progress:
+            ctx.progress.report_failed(state.current_phase, "interrupted by user", exit_code=130)
+        raise
+    except BaseException as e:
+        if ctx.progress:
+            ctx.progress.report_failed(state.current_phase, f"crash: {e}", exit_code=1)
+        raise
+
+    if result != 0 and ctx.progress:
+        ctx.progress.report_failed(state.current_phase,
+                                   f"phase {state.current_phase} returned {result}",
+                                   exit_code=result)
 
     # Update user profile after successful report
     if result == 0:
@@ -1122,7 +1432,25 @@ def setup_skill() -> int:
                 # Different symlink, remove and recreate
                 skill_target.unlink()
         else:
-            ui.warning(f"Removing existing {skill_target}")
+            # Existing real directory — confirm before destroying.
+            ui.warning(f"{skill_target} exists as a directory (not a symlink).")
+            is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+            confirmed = False
+            if is_tty and QUESTIONARY_AVAILABLE:
+                try:
+                    confirmed = questionary.confirm(
+                        f"Delete {skill_target} and replace with symlink?",
+                        default=False,
+                        style=custom_style,
+                    ).ask()
+                except Exception:
+                    confirmed = False
+            if not confirmed:
+                ui.error(
+                    f"Refusing to remove existing directory {skill_target}. "
+                    "Move or delete it manually, then re-run --setup-skill."
+                )
+                return 1
             import shutil
             shutil.rmtree(skill_target)
 
@@ -1159,21 +1487,31 @@ Claude agents in parallel, each investigating a different aspect of your topic.
 
 ---
 
-## Getting Started
+## Getting Started — Plug and Play
 
-The simplest way to start:
+The whole tool is built around one command:
 
-    deep-report "your research topic"
+    deep-report "any topic you want a deep report on"
 
-That's it! An **interactive interview** will walk you through all the options:
-- How many research agents to use
-- Which model (Sonnet or Opus)
-- Target expertise level
-- Report type (AI suggests formats tailored to your topic)
-- Whether to add seed references
+That's it. The interactive interview walks you through everything — number of
+agents, model, expertise level, report type (AI suggests formats tailored to
+your topic), and whether you want to add seed references. If you don't know
+which flags to use, **don't use any** — the interview is the main interface.
 
-**All flags are optional** - the interview covers everything. Use `--quick` only
-if you want to skip the interview and use sensible defaults.
+Want to skip the interview on repeat runs? Add `--quick`.
+
+---
+
+## First Time Running?
+
+On your first run you'll be walked through a one-time **MCP setup picker** —
+a checkbox UI for choosing which search engines, paper databases, and scraping
+tools deep-report should use. Nothing is pre-selected; pick what you want.
+
+If you already have MCP servers configured in **Claude Code**
+(`~/.claude.json`), the wizard offers to import them — no re-entering keys.
+
+Re-run any time with `deep-report --setup`.
 
 ---
 
@@ -1256,12 +1594,13 @@ your-topic_20260209_1430/
 - Reports auto-save and can be resumed with `--list`
 - Press **'v'** during execution to toggle verbose mode
 - Typical report takes 15-45 minutes depending on settings
+- Re-pick MCP servers any time with `deep-report --setup`
 
 ---
 
 Ready? Just run:
 
-    deep-report "your topic here"
+    deep-report "any topic you want a deep report on"
 
 """
 
@@ -1297,6 +1636,11 @@ def resume_report(report_dir: Path, ctx: OrchestratorContext) -> int:
     if not state_file.exists():
         ui.error("No saved session found. Start a new report with: deep-report '<topic>'")
         return 1
+
+    # Skill/agent contract: drivers using --machine --resume need to know which
+    # dir we're tailing, just like a fresh run. Emitted before any other output.
+    if ctx.machine_mode:
+        print(f"REPORT_DIR={report_dir}", flush=True)
 
     ui.info(f"Resuming report from: {report_dir}")
     try:
@@ -1373,13 +1717,16 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
         state.save()
 
     # Set up verbose toggle (press 'v' during execution)
-    # Footer shows verbose indicator, so just toggle the flag
+    # Footer shows verbose indicator, so just toggle the flag.
+    # Skip in machine mode: no Rich Live, so the keyboard listener has nothing
+    # to redraw and would just consume stdin.
     def on_verbose_toggle(enabled: bool):
         ui.set_verbose(enabled)
 
     verbose_toggle = VerboseToggle(on_toggle=on_verbose_toggle)
-    verbose_toggle.start()
-    ui.attach_verbose_toggle(verbose_toggle)
+    if not ctx.machine_mode:
+        verbose_toggle.start()
+        ui.attach_verbose_toggle(verbose_toggle)
 
     phases = [
         (1, "Setup", lambda s: True),  # Already done if start_phase > 1
@@ -1507,6 +1854,12 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
             "Iterations": state.research_iteration,
         }
     )
+
+    # Single "we're done" event for any agent tailing progress.jsonl
+    if ctx.progress:
+        report_path = str(Path(state.report_dir) / "report.md")
+        summary_path = str(Path(state.report_dir) / "SUMMARY.md")
+        ctx.progress.report_ready(report_path, summary_path, exit_code=0)
 
     return 0
 

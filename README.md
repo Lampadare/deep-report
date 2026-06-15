@@ -2,39 +2,122 @@
 
 Multi-agent research reports, powered by Claude.
 
+Deep Report spawns parallel Claude Code agents that search the web, academic
+databases, papers, and your own references — then synthesizes their findings
+into a single, citation-grounded report (typically 15–30k words).
+
 ## Install
 
 ```bash
 pipx install deep-report
 ```
 
-Requires Python 3.10+ and [Claude Code](https://claude.ai/download) installed and authenticated.
+Requires Python 3.10+ and [Claude Code](https://claude.ai/download) installed
+and authenticated.
 
 ## Use
 
-```bash
-deep-report "quantum computing" --quick
-```
-
-Or configure interactively:
+Just run it with a topic — that's the whole thing:
 
 ```bash
-deep-report "AI safety" --configure
+deep-report "any topic you want a deep report on"
 ```
 
-See all options:
+The CLI walks you through everything else. It picks a sensible number of
+agents, asks what audience the report is for, suggests report formats that
+fit your topic, and lets you tweak anything before kicking off. If you don't
+know which flags to use — **don't use any**. The interactive interview is
+the main way to drive the tool.
+
+For repeat runs, `--quick` skips the interview and uses smart defaults:
 
 ```bash
-deep-report --help
+deep-report "any topic you want a deep report on" --quick
 ```
+
+## First-run setup
+
+The first time you run `deep-report`, you'll be walked through a one-time
+MCP picker — a checkbox UI for choosing which **search engines, paper
+databases, and scraping tools** you want it to use. Nothing is pre-selected;
+tick what you want.
+
+If you already have MCP servers configured in Claude Code (`~/.claude.json`
+or `.mcp.json`), the wizard offers to import them — no re-entering keys.
+
+Re-run any time with `deep-report --setup`.
+
+## What MCPs are available
+
+| MCP | Tier | What it does |
+|---|---|---|
+| **Brave Search** | Free tier — 2k queries/mo | Web search with date + locale filters |
+| **Exa** | Free tier — $10 credit on signup | Full-text semantic search (great for deep research) |
+| **Firecrawl** | Free tier — 500 pages/mo | Search + scrape with anti-bot handling |
+| **Tavily** | Free tier — 1k credits/mo | Agent-tuned search + extract + crawl |
+| **PubMed + Europe PMC** | Free | PubMed, bioRxiv, medRxiv, full-text via EPMC |
+| **arXiv** | Free | Search, download, and read CS/physics/math papers |
+| **OpenAlex** | Free | 270M scholarly works + citation graph |
+| **Wikipedia** | Free | Universal grounding layer |
+| **Context7** | Free | Version-pinned library/API docs (essential for tech topics) |
+| **Playwright** | Free | JS-heavy / anti-bot scrape fallback |
+| **crawl4ai** | Free (Docker) | Alternative scraper |
+
+The free-tier ones need an API key — the wizard tells you exactly where to
+sign up. Anything you don't enable is simply skipped; you control what runs
+and what costs you. There are no paid-only MCPs in the default catalog.
 
 ## Claude Code skill
+
+Get a `/deep-report` slash command in Claude Code:
 
 ```bash
 deep-report --install-skill
 ```
 
-Then in Claude Code: `/deep-report "topic" --quick`
+Then in Claude Code: `/deep-report "topic"`.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `deep-report "topic"` | Run a report with the interactive interview |
+| `deep-report "topic" --quick` | Skip the interview, use smart defaults |
+| `deep-report --setup` | Open the MCP picker / re-import from Claude Code |
+| `deep-report --list` | Pick an unfinished report and resume it |
+| `deep-report --intro` | Show the onboarding guide |
+| `deep-report --update` | Pull latest from GitHub |
+| `deep-report --install-skill` | Install the `/deep-report` Claude Code skill |
+| `deep-report --help` | Full flag reference |
+
+## Output
+
+Each report lands in its own folder:
+
+```
+your-topic_20260523_1430/
+├── report.md           Final synthesized report (15–30k words)
+├── refs.md             Compiled references
+├── SUMMARY.md          Metrics and stats
+├── full/agents/        Raw research from each agent
+├── summaries/agents/   Condensed summaries
+├── papers/             Downloaded PDFs (with --download-papers)
+└── state/              Checkpoints — resume with `deep-report --list`
+```
+
+## Machine mode
+
+For driving the CLI from another program (a skill, an agent, CI) use `--machine`
+— a silent file-coordinated worker, no prompts, no Rich UI:
+
+```bash
+deep-report "topic" --machine --name "short-name" [--interactive]
+```
+
+State flows through `state/progress.jsonl` (tail with `tail -F`) and
+`state/pending_approval.json`. With `--interactive`, the CLI pauses at
+approval gates and waits for `deep-report --approve --report-dir <dir>
+--gate <id> --decision approve|reject|stop_early`.
 
 ## License
 

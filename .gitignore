@@ -48,3 +48,9 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Worktrees
+.worktrees/
+
+# Playwright MCP local snapshot output (created when scraping with @playwright/mcp)
+.playwright-mcp/

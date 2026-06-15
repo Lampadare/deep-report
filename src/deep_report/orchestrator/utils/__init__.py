@@ -10,6 +10,7 @@ from .agents import (
     ProcessTracker,
     process_tracker,
     generate_mcp_config,
+    extend_allowed_tools_for_imports,
     AGENT_TOOLS,
     DEFAULT_TIMEOUT,
     DECISION_TIMEOUT,

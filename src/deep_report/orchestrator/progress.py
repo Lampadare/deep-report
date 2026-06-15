@@ -7,9 +7,10 @@ Also supports legacy .log format for backwards compatibility.
 
 import fcntl
 import json
+import os
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -41,23 +42,56 @@ class ProgressWriter:
         return time.time() - self.start_time
 
     def _write_event(self, event_type: str, data: dict):
-        """Write a JSON-lines event with file locking."""
+        """Write a JSON-lines event durably.
+
+        fcntl.flock is advisory (writers cooperate) but readers like `tail -F`
+        don't honor it. We build the full line in memory and do a single
+        os.write inside the lock — POSIX guarantees write atomicity up to
+        PIPE_BUF (typically 4 KB). Long ``summary`` payloads or large
+        ``decision`` reasoning blobs can exceed this; in that case a concurrent
+        ``tail -F`` reader could briefly see a partial line. Drivers consuming
+        progress.jsonl should be JSONL-aware (skip lines that don't parse).
+
+        An ``os.fsync`` after the write ensures the entry survives a crash —
+        the JSONL stream is the machine-mode driver's only signal, so losing
+        the tail on a crash silently breaks the driver. The cost is one
+        fsync per event, which is fine for our event volumes.
+        """
         event = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "elapsed_secs": round(self._elapsed_secs(), 2),
             "type": event_type,
             **data
         }
+        line = (json.dumps(event) + "\n").encode("utf-8")
         try:
-            with open(self.progress_file, "a") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(json.dumps(event) + "\n")
-                    f.flush()
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            fd = os.open(self.progress_file,
+                         os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         except OSError as e:
-            print(f"Warning: Could not write progress: {e}")
+            print(f"Warning: Could not open progress file: {e}")
+            return
+        # fd is owned by this function from here — close unconditionally.
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError as e:
+                print(f"Warning: Could not lock progress file: {e}")
+                return
+            try:
+                os.write(fd, line)
+                try:
+                    os.fsync(fd)
+                except OSError:
+                    pass  # fsync is best-effort; tmpfs / pipes don't support it
+            except OSError as e:
+                print(f"Warning: Could not write progress: {e}")
+            finally:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass  # unlock is best-effort — close will release anyway
+        finally:
+            os.close(fd)
 
     def _write_legacy(self, line: str):
         """Write to legacy log format for backwards compatibility."""
@@ -183,3 +217,29 @@ class ProgressWriter:
         for key, value in stats.items():
             self._write_legacy(f"Phase 5 |   {key} | {value}")
         self._write_legacy(f"{'='*60}")
+
+    def report_ready(self, report_path: str, summary_path: str, exit_code: int = 0):
+        """Mark the report as fully done. Single 'we're finished' event for agents tailing the log."""
+        self._write_event("report_ready", {
+            "report_path": report_path,
+            "summary_path": summary_path,
+            "exit_code": exit_code,
+        })
+        self._write_legacy(f"Phase 5 | REPORT READY | exit={exit_code} | {report_path}")
+
+    def report_failed(self, phase: int, reason: str, exit_code: int = 1):
+        """Mark the report as terminally failed. Mirror of report_ready for crash paths."""
+        self._write_event("report_failed", {
+            "phase": phase,
+            "reason": reason,
+            "exit_code": exit_code,
+        })
+        self._write_legacy(f"Phase {phase} | REPORT FAILED | exit={exit_code} | {reason}")
+
+    def approval_timeout(self, gate_id: str, timeout_secs: float):
+        """Distinct event for a gate that timed out (vs user-issued reject/stop_early)."""
+        self._write_event("approval_timeout", {
+            "gate_id": gate_id,
+            "timeout_secs": timeout_secs,
+        })
+        self._write_legacy(f"Phase 0 | APPROVAL TIMEOUT | {gate_id} | {timeout_secs:.0f}s")

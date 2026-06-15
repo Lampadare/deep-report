@@ -6,11 +6,13 @@ Handles spawning Claude agents via CLI and collecting their outputs.
 
 import subprocess
 import json
-import sys
-import time
 import os
+import shutil
+import sys
 import threading
+import time
 from pathlib import Path
+from urllib.parse import quote as _url_quote
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Callable, TYPE_CHECKING
 from dataclasses import dataclass
@@ -35,26 +37,61 @@ AGENT_TOOLS = {
         # Web search (primary: built-in + exa for full-text; brave as fallback + news)
         "WebSearch", "WebFetch",
         "mcp__exa__web_search_exa",
+        "mcp__exa__web_fetch_exa",
         "mcp__exa__get_code_context_exa",
         "mcp__exa__company_research_exa",
         "mcp__brave-search__brave_web_search",
         "mcp__brave-search__brave_news_search",
-        # Academic papers (only working tools)
-        "mcp__paper-search__search_arxiv",
-        "mcp__paper-search__search_pubmed",
-        "mcp__paper-search__read_arxiv_paper",
-        "mcp__paper-search__read_medrxiv_paper",
+        "mcp__tavily__tavily_search",
+        "mcp__tavily__tavily_extract",
+        "mcp__tavily__tavily_crawl",
+        "mcp__tavily__tavily_map",
+        # Library / API docs (universal benefit for any tech topic)
+        "mcp__context7__resolve-library-id",
+        "mcp__context7__query-docs",
+        # Academic papers — arXiv (replaces paper-search.arxiv)
+        "mcp__arxiv__search_papers",
+        "mcp__arxiv__read_paper",
+        "mcp__arxiv__download_paper",
+        # Academic papers — PubMed + Europe PMC (replaces paper-search.{pubmed,biorxiv,medrxiv})
+        "mcp__pubmed__pubmed_search_articles",
+        "mcp__pubmed__pubmed_fetch_articles",
+        "mcp__pubmed__pubmed_fetch_fulltext",
+        "mcp__pubmed__pubmed_europepmc_search",
+        "mcp__pubmed__pubmed_find_related",
+        # OpenAlex — cross-discipline discovery + citation graph
+        "mcp__openalex__openalex_search_entities",
+        "mcp__openalex__openalex_get_citation_graph",
+        "mcp__openalex__openalex_resolve_name",
+        # (Unpaywall not needed — cyanheads/pubmed-mcp already chains Unpaywall internally)
+        # Wikipedia — universal grounding layer
+        "mcp__wikipedia__search_wikipedia",
+        "mcp__wikipedia__get_summary",
+        "mcp__wikipedia__get_article",
         # Page fetching
         "mcp__firecrawl__firecrawl_scrape",
         "mcp__crawl4ai__scrape",
+        # Playwright fallback — for JS-heavy / anti-bot pages (restricted subset)
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_wait_for",
+        "mcp__playwright__browser_close",
     ],
     "research_fallback": [
         "Read", "Glob", "Grep", "Write", "WebSearch", "WebFetch",
     ],
     "seed_processing": [
         "Read", "Write",
+        # WebFetch is always available — guarantees a fetch capability even
+        # if the user enabled an MCP stack without firecrawl/crawl4ai/playwright.
+        "WebFetch",
         "mcp__firecrawl__firecrawl_scrape",
         "mcp__crawl4ai__scrape",
+        # Playwright is a useful fallback for JS-heavy/anti-bot pages.
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_wait_for",
+        "mcp__playwright__browser_close",
     ],
     "seed_processing_fallback": [
         "Read", "Write", "WebSearch", "WebFetch",
@@ -66,6 +103,28 @@ AGENT_TOOLS = {
 
 # Allowed model names
 ALLOWED_MODELS = ["sonnet", "opus", "haiku"]
+
+
+def extend_allowed_tools_for_imports(base: list[str]) -> list[str]:
+    """Append wildcard allow entries for any user-enabled CC-imported MCP server.
+
+    ``--allowedTools`` on Claude CLI is a strict allowlist; without these
+    entries, tools served by imported MCPs (registered in mcp.json) would be
+    silently denied at runtime. The pattern ``mcp__<server>`` allows every
+    tool exposed by that server — appropriate here because the user has
+    explicitly opted in via the wizard.
+
+    Catalog servers stay restricted to their specific tool names in
+    ``AGENT_TOOLS`` — only imports get the wildcard.
+    """
+    try:
+        from ..setup_wizard import enabled_keys, imported_servers
+        enabled = enabled_keys() or set()
+        imports = imported_servers()
+    except Exception:
+        return base
+    extras = [f"mcp__{name}" for name in imports if name in enabled]
+    return base + extras if extras else base
 
 # Docker image for crawl4ai MCP server
 _CRAWL4AI_IMAGE = "uysalsadi/crawl4ai-mcp-server:latest"
@@ -101,24 +160,84 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
             "env": {"FIRECRAWL_API_KEY": os.environ["FIRECRAWL_API_KEY"]},
         }
 
-    # Exa uses HTTP transport with API key passed as query parameter
-    exa_key = os.environ.get("EXA_API_KEY")
-    if exa_key:
-        servers["exa"] = {
+    # Tavily — agent-optimized search via remote HTTP endpoint (free tier: 1k credits/mo).
+    # No Node required — same pattern as Exa. Keys are URL-encoded so special chars survive.
+    tavily_key = os.environ.get("TAVILY_API_KEY")
+    if tavily_key:
+        servers["tavily"] = {
             "type": "http",
-            "url": f"https://mcp.exa.ai/mcp?exaApiKey={exa_key}",
+            "url": f"https://mcp.tavily.com/mcp/?tavilyApiKey={_url_quote(tavily_key, safe='')}",
         }
 
-    # paper-search: check if the python module is installed
-    try:
-        import importlib.util
-        if importlib.util.find_spec("paper_search_mcp"):
-            servers["paper-search"] = {
-                "command": sys.executable,
-                "args": ["-m", "paper_search_mcp.server"],
-            }
-    except (ImportError, ValueError):
-        pass
+    # Exa via npx-distributed exa-mcp-server (exposes more tools than the hosted
+    # HTTP endpoint: web_search_exa, web_fetch_exa, get_code_context_exa,
+    # company_research_exa, deep_researcher_*, etc).
+    exa_key = os.environ.get("EXA_API_KEY")
+    if exa_key and has_npx:
+        servers["exa"] = {
+            "command": "npx",
+            "args": ["-y", "exa-mcp-server"],
+            "env": {"EXA_API_KEY": exa_key},
+        }
+
+    # Academic stack — replaces the abandoned paper-search-mcp (broken bioRxiv/medRxiv/PubMed bits)
+
+    # PubMed + Europe PMC + bioRxiv/medRxiv via cyanheads/pubmed-mcp-server
+    if has_npx:
+        servers["pubmed"] = {
+            "command": "npx",
+            "args": ["-y", "@cyanheads/pubmed-mcp-server"],
+        }
+        if os.environ.get("NCBI_API_KEY"):
+            servers["pubmed"]["env"] = {"NCBI_API_KEY": os.environ["NCBI_API_KEY"]}
+
+    # OpenAlex — cross-discipline discovery + citation graph (270M works).
+    # The cyanheads server requires OPENALEX_API_KEY at startup (the value is just an
+    # email used for the polite-pool). We pass an anonymous sentinel when the user
+    # hasn't configured one — OpenAlex still works, just demoted from the polite pool.
+    if has_npx:
+        openalex_contact = (
+            os.environ.get("OPENALEX_API_KEY")
+            or os.environ.get("OPENALEX_EMAIL")
+            or "deep-report-anonymous@example.com"
+        )
+        servers["openalex"] = {
+            "command": "npx",
+            "args": ["-y", "@cyanheads/openalex-mcp-server"],
+            # Set both env names — the upstream server has used either across versions.
+            "env": {
+                "OPENALEX_API_KEY": openalex_contact,
+                "OPENALEX_EMAIL": openalex_contact,
+            },
+        }
+
+    # arXiv — prefer installed console script, fall back to uvx
+    if shutil.which("arxiv-mcp-server"):
+        servers["arxiv"] = {"command": "arxiv-mcp-server", "args": []}
+    elif _cmd_exists("uvx"):
+        servers["arxiv"] = {"command": "uvx", "args": ["arxiv-mcp-server"]}
+
+    # Wikipedia — universal grounding, no key
+    if shutil.which("wikipedia-mcp"):
+        servers["wikipedia"] = {"command": "wikipedia-mcp", "args": []}
+    elif _cmd_exists("uvx"):
+        servers["wikipedia"] = {"command": "uvx", "args": ["wikipedia-mcp"]}
+
+    # Context7 — version-pinned library/API docs. Works keyless; key raises rate limits.
+    if has_npx:
+        servers["context7"] = {
+            "command": "npx",
+            "args": ["-y", "@upstash/context7-mcp"],
+        }
+        if os.environ.get("CONTEXT7_API_KEY"):
+            servers["context7"]["env"] = {"CONTEXT7_API_KEY": os.environ["CONTEXT7_API_KEY"]}
+
+    # Playwright (Microsoft) — JS-heavy / anti-bot scrape fallback. Accessibility-tree based.
+    if has_npx:
+        servers["playwright"] = {
+            "command": "npx",
+            "args": ["-y", "@playwright/mcp@latest"],
+        }
 
     # crawl4ai via docker — only if docker + image are available (skip if not pulled)
     if _cmd_exists("docker"):
@@ -135,22 +254,61 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
         except (subprocess.TimeoutExpired, OSError):
             pass
 
-    if os.environ.get("DIGIKEY_CLIENT_ID"):
-        digikey_dir = Path.home() / ".local" / "share" / "digikey-mcp"
-        if digikey_dir.exists() and _cmd_exists("uv"):
-            servers["digikey"] = {
-                "command": "uv",
-                "args": [
-                    "--directory", str(digikey_dir),
-                    "run", "python", "digikey_mcp_server.py",
-                ],
-            }
+    # (Vertical MCPs like DigiKey are no longer auto-registered; users who
+    # need them should configure via Claude Code and import via the wizard.
+    # That path uses a wildcard `mcp__<name>` allow entry at spawn time.)
 
-    # Require at least one search provider (web or academic)
-    has_search = any(
-        k in servers for k in ("brave-search", "exa", "firecrawl", "paper-search")
-    )
-    if not has_search:
+    # If the user has run `deep-report --setup`, only keep servers they enabled.
+    # Otherwise (first run / no config), include everything we discovered.
+    # Wrapped defensively — a broken wizard module must not break agent spawning.
+    try:
+        from ..setup_wizard import enabled_keys, imported_servers
+        user_enabled = enabled_keys()
+        cc_imports = imported_servers()
+    except Exception as e:
+        ui.warning(f"Could not read MCP wizard config ({e}) — including all discovered servers")
+        user_enabled = None
+        cc_imports = {}
+
+    # Merge any CC-imported servers into the candidate set (catalog-discovered
+    # entries take precedence on name collisions, although discover_cc_servers
+    # excludes catalog names so this is mostly defensive). Each config is
+    # shape-validated: a valid MCP block is either ``{type: "http", url: ...}``
+    # or ``{command: ..., args?: [...], env?: {...}}``. Imports that don't
+    # match are skipped with a warning rather than passed verbatim to the CLI.
+    for name, cfg in cc_imports.items():
+        if not isinstance(cfg, dict):
+            ui.warning(f"Imported MCP '{name}' is not a dict — skipped")
+            continue
+        is_http = cfg.get("type") == "http" and isinstance(cfg.get("url"), str)
+        is_cmd = isinstance(cfg.get("command"), str) and cfg.get("command")
+        if not (is_http or is_cmd):
+            ui.warning(f"Imported MCP '{name}' has neither HTTP url nor command — skipped")
+            continue
+        if is_cmd and not shutil.which(cfg["command"]):
+            ui.verbose(f"Imported MCP '{name}' references missing binary "
+                       f"'{cfg['command']}' — may fail at agent spawn time")
+        servers.setdefault(name, cfg)
+
+    if user_enabled is not None:
+        skipped = [k for k in servers if k not in user_enabled]
+        if skipped:
+            ui.verbose(f"Skipping disabled MCPs per ~/.deep-report/mcp_config.json: {skipped}")
+        servers = {k: v for k, v in servers.items() if k in user_enabled}
+
+    # Require at least one search-capable backend. Catalog entries are listed
+    # explicitly; CC-imported MCPs are treated as search-capable on the user's
+    # behalf (they explicitly opted in via the wizard, so a "no search provider"
+    # rejection would silently drop their selection). Compute eligibility from
+    # the post-validation `servers` dict so an import that failed schema
+    # validation doesn't bypass the gate.
+    catalog_search_keys = {
+        "brave-search", "exa", "firecrawl", "tavily",
+        "pubmed", "openalex", "arxiv", "wikipedia",
+    }
+    has_catalog_search = any(k in servers for k in catalog_search_keys)
+    has_enabled_imports = any(name in servers for name in cc_imports)
+    if not (has_catalog_search or has_enabled_imports):
         if servers:
             ui.verbose(f"MCP servers available ({list(servers)}) but no search provider — skipping MCP config")
         return None
@@ -160,7 +318,33 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
         config_path = state_dir / "mcp.json"
-        config_path.write_text(json.dumps(config, indent=2))
+        # mcp.json embeds plaintext API keys. Create the file mode-restricted
+        # in a single syscall (O_CREAT with mode 0o600) instead of
+        # write-then-chmod — eliminates the sub-millisecond window where the
+        # file would otherwise be world-readable at the default umask.
+        payload = json.dumps(config, indent=2).encode("utf-8")
+        fd = os.open(
+            config_path,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o600,
+        )
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(payload)
+        except Exception:
+            # If fdopen took ownership it closed fd on exit; if not, close it.
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        # Belt-and-suspenders: if the file already existed before this call
+        # and the open didn't replace its mode (some FS / umask interactions),
+        # tighten it now. No-op on POSIX where O_CREAT honoured 0o600.
+        try:
+            config_path.chmod(0o600)
+        except OSError:
+            pass  # Windows / odd FS — non-fatal
         return config_path
     except OSError as e:
         ui.warning(f"Failed to write MCP config: {e} — falling back to WebSearch/WebFetch")

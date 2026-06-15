@@ -6,10 +6,24 @@ CRITICAL: Only shows metadata, NEVER reads research content.
 """
 
 import json
+import os
 import queue
+import time
+from itertools import count
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
+
+
+def _utcnow_iso() -> str:
+    """Timezone-aware ISO timestamp for cross-host driver correlation."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+class _GateRejected(Exception):
+    """Caller asked to reject the current request (not approve, not stop_early).
+    Distinct from the False return value so iteration_gate can react differently
+    from a user-issued stop_early."""
 
 try:
     from rich.box import ROUNDED
@@ -46,11 +60,25 @@ class ApprovalGate:
     """
 
     def __init__(self, report_dir: Path, interactive: bool = False,
-                 progress: Optional[ProgressWriter] = None):
+                 progress: Optional[ProgressWriter] = None,
+                 approval_mode: str = "stdin"):
+        """
+        Args:
+            approval_mode: How to gather the user's decision.
+                "stdin" — block on console.input() (default, current behavior)
+                "file"  — write request to pending_approval.json and poll for a `response`
+                          block. Used by --machine --interactive.
+                "auto"  — short-circuit to approved without writing or asking. Used by
+                          --machine alone and any non-interactive run.
+        """
         self.report_dir = Path(report_dir)
         self.interactive = interactive
         self.approval_file = self.report_dir / "state" / "pending_approval.json"
         self.progress = progress
+        self.approval_mode = approval_mode
+        # Monotonic counter so the poll loop only accepts responses tagged to
+        # the current request (prevents stale-response replay across iterations).
+        self._request_seq = count(1)
 
     # Gate types control which options are shown
     GATE_PROCEED_OR_QUIT = "proceed_or_quit"      # Enter=proceed, q=quit
@@ -70,19 +98,24 @@ class ApprovalGate:
         Returns:
             True if approved, False if stopped early, or str with feedback text
         """
-        if not self.interactive:
+        if self.approval_mode == "auto" or not self.interactive:
             return True  # Auto-approve in non-interactive mode
+
+        if self.approval_mode == "file":
+            return self._wait_for_file_response(
+                gate_id, metadata, gate_type, allow_feedback
+            )
 
         # Write approval request to file
         request = {
             "gate_id": gate_id,
             "metadata": metadata,
             "status": "pending",
-            "requested_at": datetime.now().isoformat(),
+            "requested_at": _utcnow_iso(),
         }
         try:
             self.approval_file.parent.mkdir(parents=True, exist_ok=True)
-            self.approval_file.write_text(json.dumps(request, indent=2))
+            self._atomic_write_json(request)
         except Exception as e:
             ui.warning(f"Approval state saving failed: {e}")
 
@@ -190,11 +223,11 @@ class ApprovalGate:
                     if feedback:
                         request["status"] = "feedback"
                         request["feedback"] = feedback
-                        request["responded_at"] = datetime.now().isoformat()
+                        request["responded_at"] = _utcnow_iso()
                         try:
-                            self.approval_file.write_text(json.dumps(request, indent=2))
-                        except Exception:
-                            pass
+                            self._atomic_write_json(request)
+                        except Exception as e:
+                            ui.warning(f"Approval state save failed: {e}")
                         return feedback
                     ui.warning("Empty feedback, try again")
                     continue
@@ -214,11 +247,11 @@ class ApprovalGate:
 
         if response == 'q':
             request["status"] = "quit"
-            request["responded_at"] = datetime.now().isoformat()
+            request["responded_at"] = _utcnow_iso()
             try:
-                self.approval_file.write_text(json.dumps(request, indent=2))
-            except Exception:
-                pass
+                self._atomic_write_json(request)
+            except Exception as e:
+                ui.warning(f"Approval state save failed: {e}")
             if self.progress:
                 self.progress.approval_received(gate_id, False)
             raise KeyboardInterrupt("User quit at approval gate")
@@ -226,11 +259,11 @@ class ApprovalGate:
         approved = response != 's'
 
         request["status"] = "approved" if approved else "stopped_early"
-        request["responded_at"] = datetime.now().isoformat()
+        request["responded_at"] = _utcnow_iso()
         try:
-            self.approval_file.write_text(json.dumps(request, indent=2))
-        except Exception:
-            pass
+            self._atomic_write_json(request)
+        except Exception as e:
+            ui.warning(f"Approval state save failed: {e}")
 
         if self.progress:
             self.progress.approval_received(gate_id, approved)
@@ -316,7 +349,44 @@ class ApprovalGate:
 
         coverage = decision.get("coverage")
         gate_id = f"iteration_{iteration + 1}"
-        requested_at = datetime.now().isoformat()
+        requested_at = _utcnow_iso()
+
+        # Machine-mode driven approval: skip the keyboard TUI, poll the file instead.
+        # Approve = take all suggestions with default model. Stop_early = no follow-ups.
+        if self.approval_mode == "file":
+            metadata = {
+                "iteration": iteration + 1,
+                "sufficient": sufficient,
+                "research_meta": research_meta,
+                "suggestions": [
+                    {"type": r["type"], "text": r["text"]} for r in rows
+                ],
+                "coverage": coverage,
+            }
+            result = self._wait_for_file_response(
+                gate_id, metadata,
+                gate_type=self.GATE_PROCEED_STOP_QUIT,
+                allow_feedback=False,
+            )
+            if result is False:
+                return False  # stop_early
+            # Approve all suggestions with default model. Use the same
+            # {"focus", "model"} dict shape as the Rich path so the
+            # downstream _create_followups._zip_entries (which calls
+            # `entry.get(...)`) works for both code paths.
+            decision["gaps_with_model"] = [
+                {"focus": r["text"], "model": r["model"]}
+                for r in rows if r["type"] == "gap"
+            ]
+            decision["conflicts_with_model"] = [
+                {"focus": r["text"], "model": r["model"]}
+                for r in rows if r["type"] == "conflict"
+            ]
+            decision["deepen_with_model"] = [
+                {"focus": r["text"], "model": r["model"]}
+                for r in rows if r["type"] == "deepen"
+            ]
+            return True
 
         if self.progress:
             self.progress.approval_waiting(gate_id)
@@ -507,7 +577,14 @@ class ApprovalGate:
             hint.append("a/d all  ", "dim cyan")
             hint.append("S/O bulk model  ", "dim cyan")
             hint.append("+ custom  ", "dim magenta")
-            hint.append("Enter confirm  ", "dim green")
+            if sufficient:
+                # When the decision agent reports sufficient coverage, surface
+                # the stop-and-synthesize path prominently.
+                hint.append("Enter synthesize  ", "bold green")
+                hint.append("c continue research  ", "dim yellow")
+            else:
+                hint.append("Enter confirm  ", "dim green")
+                hint.append("x stop+synthesize  ", "dim yellow")
             hint.append("q quit", "dim red")
             items.append(Panel(
                 hint,
@@ -571,8 +648,25 @@ class ApprovalGate:
                         if r["approved"]:
                             r["model"] = "opus"
                 elif ch in ("\r", "\n"):
-                    action = "approve"
+                    # When the decision agent has already reported sufficient
+                    # coverage, Enter defaults to "stop and synthesize" so the
+                    # user doesn't accidentally pay for another iteration of
+                    # research. The "c" key remains available to continue.
+                    action = "stop" if sufficient else "approve"
                     break
+                elif ch == "x":
+                    # Explicit stop-and-synthesize on the not-yet-sufficient
+                    # path. Mirrors the plain-fallback's "s" key.
+                    if not sufficient:
+                        action = "stop"
+                        break
+                elif ch == "c":
+                    # Explicit "continue research" override on the sufficient
+                    # path — the user wants more research despite the agent
+                    # saying enough.
+                    if sufficient:
+                        action = "approve"
+                        break
                 elif ch == "q":
                     action = "quit"
                     break
@@ -717,6 +811,180 @@ class ApprovalGate:
                 })
             return "approve"
 
+    def _atomic_write_json(self, payload: dict):
+        """Write JSON atomically: temp file + os.replace.
+
+        Prevents readers from seeing a partial file mid-write. Raises if the
+        write fails; callers MUST handle that — silently swallowing a failed
+        approval write turns into a silent auto-approve of a paid gate.
+
+        Tmp file name includes PID + a monotonic suffix so multiple writers
+        sharing the same state directory (e.g., crash + resume, or two gates
+        firing back-to-back) cannot clobber each other's tmp file.
+        """
+        self.approval_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.approval_file.with_suffix(
+            f".tmp.{os.getpid()}.{time.monotonic_ns()}"
+        )
+        tmp.write_text(json.dumps(payload, indent=2))
+        os.replace(tmp, self.approval_file)
+
+    def _wait_for_file_response(self, gate_id: str, metadata: dict,
+                                gate_type: str, allow_feedback: bool,
+                                poll_secs: float = 2.0,
+                                timeout_secs: float = 3600.0) -> bool | str:
+        """Write a pending approval request and poll for a response block.
+
+        Protocol:
+          - Worker writes a request with `gate_id`, `request_seq` (monotonic),
+            `status="pending"`, and an empty/absent `response`. Atomic publish.
+          - Driver (skill or `deep-report --approve`) writes a `response` block
+            into the same file with matching `gate_id` and `request_seq`.
+          - Worker's poll only accepts responses whose `gate_id` AND `request_seq`
+            match the current request AND whose `status != "resolved"`.
+
+        Returns:
+          True = approved
+          False = stopped early (driver says "synthesize what we have")
+          str = feedback text (only when allow_feedback)
+          On timeout: emits a distinct approval_timeout event and returns False.
+
+        Raises:
+          KeyboardInterrupt — driver decision == "reject". Distinct from
+            stop_early: reject means "abort, do not synthesize either",
+            matching the interactive "q" key semantics.
+        """
+        seq = next(self._request_seq)
+        request = {
+            "gate_id": gate_id,
+            "request_seq": seq,
+            "metadata": metadata,
+            "gate_type": gate_type,
+            "allow_feedback": allow_feedback,
+            "status": "pending",
+            "requested_at": _utcnow_iso(),
+            "response": None,  # explicit null — never inherit a prior gate's response
+        }
+        try:
+            self._atomic_write_json(request)
+        except Exception as e:
+            # Could not serialize the request — do NOT auto-approve. An interactive
+            # gate that cannot publish its request must fail closed.
+            ui.error(f"Could not write approval request for gate '{gate_id}': {e}")
+            if self.progress:
+                self.progress.error(0, f"approval gate '{gate_id}' could not be written: {e}")
+                self.progress.approval_received(gate_id, False)
+            return False
+
+        if self.progress:
+            self.progress.approval_waiting(gate_id)
+
+        try:
+            return self._poll_for_response(
+                gate_id, seq, allow_feedback, poll_secs, timeout_secs
+            )
+        except KeyboardInterrupt:
+            # Persist a clear terminal state so the file isn't left "pending" forever.
+            # If even this save fails (disk full, path deleted), surface it — a silent
+            # failure here means the driver never learns the gate was interrupted.
+            try:
+                current = json.loads(self.approval_file.read_text())
+                current["status"] = "interrupted"
+                current["responded_at"] = _utcnow_iso()
+                self._atomic_write_json(current)
+            except Exception as e:
+                ui.warning(f"Could not mark approval '{gate_id}' as interrupted: {e}")
+                if self.progress:
+                    self.progress.error(0, f"approval gate '{gate_id}' interrupted state save failed: {e}")
+            if self.progress:
+                self.progress.approval_received(gate_id, False)
+            raise
+
+    def _poll_for_response(self, gate_id: str, request_seq: int,
+                           allow_feedback: bool, poll_secs: float,
+                           timeout_secs: float) -> bool | str:
+        """Inner poll loop. Extracted so KeyboardInterrupt handling is clean."""
+
+        deadline = time.monotonic() + timeout_secs
+        consecutive_missing = 0
+        while time.monotonic() < deadline:
+            try:
+                current = json.loads(self.approval_file.read_text())
+            except FileNotFoundError:
+                # File was deleted (e.g., user wiped state). Surface clearly
+                # after a few consecutive misses to avoid log spam on transient
+                # races; recreating the request is the driver's responsibility.
+                consecutive_missing += 1
+                if consecutive_missing == 3:
+                    ui.warning(
+                        f"Approval file missing for gate '{gate_id}'; waiting…"
+                    )
+                time.sleep(poll_secs)
+                continue
+            except json.JSONDecodeError:
+                # Mid-write race or tampered file — wait for the next tick.
+                time.sleep(poll_secs)
+                continue
+            consecutive_missing = 0
+
+            # Defensive checks: only accept responses bound to THIS request.
+            if current.get("gate_id") != gate_id:
+                time.sleep(poll_secs)
+                continue
+            if current.get("request_seq") != request_seq:
+                time.sleep(poll_secs)
+                continue
+            if current.get("status") == "resolved":
+                time.sleep(poll_secs)
+                continue
+
+            response = current.get("response")
+            if response:
+                decision = response.get("decision", "approve")
+                feedback = response.get("feedback", "")
+                approved = decision == "approve"
+                if self.progress:
+                    self.progress.approval_received(gate_id, approved)
+
+                # Mark resolved so a stale read can't re-trigger us.
+                current["status"] = "resolved"
+                try:
+                    self._atomic_write_json(current)
+                except Exception as e:
+                    ui.warning(f"Approval state save failed: {e}")
+
+                # Branch on `decision` first — a reject that happens to carry
+                # a feedback field must still abort, not be misinterpreted as
+                # replan feedback.
+                if decision == "reject":
+                    raise KeyboardInterrupt(
+                        f"Driver rejected approval gate '{gate_id}'"
+                    )
+                if decision == "stop_early":
+                    return False
+                # An explicit approve is unconditional — non-empty feedback
+                # tagged onto it must NOT be re-interpreted as a replan.
+                if decision == "approve":
+                    if feedback:
+                        ui.warning(
+                            f"approve decision for gate '{gate_id}': "
+                            "ignoring feedback because approve is unconditional"
+                        )
+                    return approved
+                if allow_feedback and feedback:
+                    return feedback
+                return approved
+
+            time.sleep(poll_secs)
+
+        # Timeout — distinct from rejection. Emit a dedicated event so the
+        # driver can tell "user walked away" from "user said no".
+        ui.error(f"Approval gate '{gate_id}' timed out after {timeout_secs:.0f}s")
+        if self.progress:
+            self.progress.approval_timeout(gate_id, timeout_secs)
+            self.progress.approval_received(gate_id, False)
+        return False
+
     def _save_gate_status(self, gate_id: str, status: str,
                           requested_at: str = None):
         """Persist gate status to approval file."""
@@ -727,12 +995,12 @@ class ApprovalGate:
         if requested_at:
             request["requested_at"] = requested_at
         if status != "pending":
-            request["responded_at"] = datetime.now().isoformat()
+            request["responded_at"] = _utcnow_iso()
         try:
             self.approval_file.parent.mkdir(parents=True, exist_ok=True)
-            self.approval_file.write_text(json.dumps(request, indent=2))
-        except Exception:
-            pass
+            self._atomic_write_json(request)
+        except Exception as e:
+            ui.warning(f"Approval state save failed: {e}")
 
     def pre_synthesis_gate(self, state) -> bool:
         """Approval gate before synthesis (optional)."""
