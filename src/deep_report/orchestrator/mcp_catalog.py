@@ -50,6 +50,11 @@ class MCPSpec:
     requires_uv: bool = False
     requires_docker: bool = False
 
+    # README-facing one-liner ("What it does" column).
+    short_desc: str = ""
+    # README-facing tier phrase ("Tier" column). Empty = derive from `tier`.
+    tier_label: str = ""
+
 
 CATALOG: tuple[MCPSpec, ...] = (
     # ─── Web search ────────────────────────────────────────────────────────
@@ -64,6 +69,8 @@ CATALOG: tuple[MCPSpec, ...] = (
         key_signup_url="https://brave.com/search/api/",
         cost_note="2,000 free queries/mo; ~$3/1k after.",
         requires_node=True,
+        short_desc="Web search with date + locale filters",
+        tier_label="Free tier — 2k queries/mo",
     ),
     MCPSpec(
         key="exa",
@@ -71,10 +78,13 @@ CATALOG: tuple[MCPSpec, ...] = (
         category=CAT_WEB,
         tier=TIER_FREE_TIER,
         summary="Semantic search with full-page text — best for deep research.",
-        transport="http",
+        transport="npx",
         required_env=("EXA_API_KEY",),
         key_signup_url="https://dashboard.exa.ai",
         cost_note="$10 free credits on signup; pay-as-you-go.",
+        requires_node=True,
+        short_desc="Full-text semantic search (great for deep research)",
+        tier_label="Free tier — $10 credit on signup",
     ),
     MCPSpec(
         key="firecrawl",
@@ -87,6 +97,8 @@ CATALOG: tuple[MCPSpec, ...] = (
         key_signup_url="https://www.firecrawl.dev",
         cost_note="500 free credits/mo; ~$0.02/page after.",
         requires_node=True,
+        short_desc="Search + scrape with anti-bot handling",
+        tier_label="Free tier — 500 pages/mo",
     ),
     MCPSpec(
         key="tavily",
@@ -98,6 +110,8 @@ CATALOG: tuple[MCPSpec, ...] = (
         required_env=("TAVILY_API_KEY",),
         key_signup_url="https://app.tavily.com",
         cost_note="1,000 free credits/mo; pay-as-you-go.",
+        short_desc="Agent-tuned search + extract + crawl",
+        tier_label="Free tier — 1k credits/mo",
     ),
     # ─── Academic ──────────────────────────────────────────────────────────
     MCPSpec(
@@ -111,6 +125,7 @@ CATALOG: tuple[MCPSpec, ...] = (
         key_signup_url="https://www.ncbi.nlm.nih.gov/account/",
         cost_note="Free. NCBI key raises rate limit (3→10 req/s).",
         requires_node=True,
+        short_desc="PubMed, bioRxiv, medRxiv, full-text via EPMC",
     ),
     MCPSpec(
         key="openalex",
@@ -124,6 +139,7 @@ CATALOG: tuple[MCPSpec, ...] = (
         key_signup_url="https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication#the-polite-pool",
         cost_note="Free. Setting OPENALEX_EMAIL with your own email upgrades to polite pool (faster).",
         requires_node=True,
+        short_desc="270M scholarly works + citation graph",
     ),
     MCPSpec(
         key="arxiv",
@@ -134,6 +150,7 @@ CATALOG: tuple[MCPSpec, ...] = (
         transport="console_script",
         cost_note="Free.",
         requires_uv=True,  # falls back to uvx if console script missing
+        short_desc="Search, download, and read CS/physics/math papers",
     ),
     MCPSpec(
         key="wikipedia",
@@ -144,6 +161,7 @@ CATALOG: tuple[MCPSpec, ...] = (
         transport="console_script",
         cost_note="Free.",
         requires_uv=True,  # falls back to uvx if console script missing
+        short_desc="Universal grounding layer",
     ),
     # ─── Docs ──────────────────────────────────────────────────────────────
     MCPSpec(
@@ -157,6 +175,8 @@ CATALOG: tuple[MCPSpec, ...] = (
         key_signup_url="https://context7.com",
         cost_note="Free without key; key raises rate limits.",
         requires_node=True,
+        short_desc="Version-pinned library/API docs (essential for tech topics)",
+        tier_label="Free",
     ),
     # ─── Scrape fallback ───────────────────────────────────────────────────
     MCPSpec(
@@ -168,6 +188,7 @@ CATALOG: tuple[MCPSpec, ...] = (
         transport="npx",
         cost_note="Free; downloads Chromium on first run.",
         requires_node=True,
+        short_desc="JS-heavy / anti-bot scrape fallback",
     ),
     MCPSpec(
         key="crawl4ai",
@@ -178,6 +199,8 @@ CATALOG: tuple[MCPSpec, ...] = (
         transport="docker",
         cost_note="Free; requires Docker + pulled image.",
         requires_docker=True,
+        short_desc="Alternative scraper",
+        tier_label="Free (Docker)",
     ),
     # (Vertical-domain MCPs like DigiKey are intentionally not in the catalog
     # because research agents don't have their tool names in AGENT_TOOLS.
