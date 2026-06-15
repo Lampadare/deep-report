@@ -37,12 +37,14 @@ Repository = "https://github.com/lampadare/deep-report"
 packages = ["src/deep_report"]
 
 [tool.hatch.build.targets.sdist]
-exclude = [
-  "SEARCH_TOOLS.md",
-  "SEARCH_TOOLS_FIXES.md",
-  "uv.lock",
-  ".gitignore",
-  "tests/",
+# Allowlist mode — nothing slips in. Hatchling forces .gitignore into
+# sdists regardless of this config; it's harmless (wheel excludes it,
+# never installed).
+only-include = [
+  "src/deep_report",
+  "README.md",
+  "LICENSE",
+  "pyproject.toml",
 ]
 
 [tool.ruff]
