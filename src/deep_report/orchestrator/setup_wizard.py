@@ -24,6 +24,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 try:
     import questionary
@@ -41,7 +42,6 @@ from .mcp_catalog import (
     TIER_FREE_TIER,
     TIER_PAID,
     MCPSpec,
-    default_enabled_keys,
 )
 from .ui import ui
 
@@ -90,7 +90,12 @@ def _summarize_cc_entry(cfg: dict) -> str:
     """Short human label for a CC-imported server config."""
     if cfg.get("type") == "http":
         url = cfg.get("url", "")
-        host = url.split("/")[2] if url.count("/") >= 2 else url
+        # urlsplit strips userinfo (user:password@) from the displayed host so
+        # credentials embedded in a user's MCP URL never appear in the summary.
+        parts = urlsplit(url)
+        host = parts.hostname or "?"
+        if parts.port:
+            host = f"{host}:{parts.port}"
         return f"http → {host}"
     cmd = cfg.get("command", "?")
     args = cfg.get("args", [])
@@ -189,12 +194,16 @@ def load_config() -> Optional[dict]:
     if not CONFIG_PATH.exists():
         return None
     try:
-        return json.loads(CONFIG_PATH.read_text())
+        data = json.loads(CONFIG_PATH.read_text())
     except json.JSONDecodeError:
         ui.warning(f"MCP config at {CONFIG_PATH} is not valid JSON — re-run `deep-report --setup`")
         return None
     except OSError:
         return None
+    if not isinstance(data, dict):
+        ui.warning(f"MCP config at {CONFIG_PATH} is not a JSON object — re-run `deep-report --setup`")
+        return None
+    return data
 
 
 def save_config(enabled: list[str], imported: Optional[dict[str, dict]] = None) -> Path:
@@ -205,7 +214,21 @@ def save_config(enabled: list[str], imported: Optional[dict[str, dict]] = None) 
     from their Claude Code setup (keyed by server name). Those configs may
     embed plaintext API keys, so the file is chmod 0600 after the move.
     """
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # If ~/.deep-report somehow exists as a regular file (or symlink to one),
+    # mkdir would raise NotADirectoryError with no actionable context. Detect
+    # that up front and tell the user exactly what to do.
+    parent = CONFIG_PATH.parent
+    if parent.exists() and not parent.is_dir():
+        ui.error(
+            f"Cannot save MCP config: {parent} exists but is not a directory. "
+            f"Move or remove it (e.g. `mv {parent} {parent}.bak`) and re-run `deep-report --setup`."
+        )
+        return CONFIG_PATH
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        ui.error(f"Cannot create {parent}: {exc}")
+        return CONFIG_PATH
     payload: dict = {
         "version": 2,
         "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -220,17 +243,22 @@ def save_config(enabled: list[str], imported: Optional[dict[str, dict]] = None) 
     # world-readable at the default umask.
     tmp = CONFIG_PATH.with_suffix(f".tmp.{os.getpid()}.{time.monotonic_ns()}")
     body = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(body)
-    except Exception:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            os.close(fd)
-        except OSError:
-            pass
+            with os.fdopen(fd, "wb") as f:
+                f.write(body)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        os.replace(tmp, CONFIG_PATH)
+    except OSError:
+        # Disk full, permission denied, etc. — don't leave the tmp file behind.
+        Path(tmp).unlink(missing_ok=True)
         raise
-    os.replace(tmp, CONFIG_PATH)
     try:
         CONFIG_PATH.chmod(0o600)  # belt-and-suspenders for non-POSIX FS
     except OSError:
@@ -247,10 +275,15 @@ def enabled_keys() -> Optional[set[str]]:
     cfg = load_config()
     if cfg is None:
         return None
+    if not isinstance(cfg, dict):
+        return None
     if "enabled" not in cfg:
         ui.warning(f"MCP config at {CONFIG_PATH} has no 'enabled' key — re-run `deep-report --setup`")
         return None
-    return set(cfg["enabled"])
+    enabled = cfg["enabled"]
+    if not isinstance(enabled, (list, set, tuple)):
+        return None
+    return {k for k in enabled if isinstance(k, str)}
 
 
 def imported_servers() -> dict[str, dict]:
@@ -268,6 +301,8 @@ def imported_servers() -> dict[str, dict]:
     """
     cfg = load_config()
     if cfg is None:
+        return {}
+    if not isinstance(cfg, dict):
         return {}
     raw = cfg.get("imported")
     if not isinstance(raw, dict):

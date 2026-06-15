@@ -50,11 +50,6 @@ class MCPSpec:
     requires_uv: bool = False
     requires_docker: bool = False
 
-    # Whether this server is enabled by default when the user first runs setup.
-    # Things that are free and universally useful default to on. Paid/niche
-    # default to off — user opts in.
-    default_enabled: bool = False
-
 
 CATALOG: tuple[MCPSpec, ...] = (
     # ─── Web search ────────────────────────────────────────────────────────
@@ -69,7 +64,6 @@ CATALOG: tuple[MCPSpec, ...] = (
         key_signup_url="https://brave.com/search/api/",
         cost_note="2,000 free queries/mo; ~$3/1k after.",
         requires_node=True,
-        default_enabled=True,
     ),
     MCPSpec(
         key="exa",
@@ -81,7 +75,6 @@ CATALOG: tuple[MCPSpec, ...] = (
         required_env=("EXA_API_KEY",),
         key_signup_url="https://dashboard.exa.ai",
         cost_note="$10 free credits on signup; pay-as-you-go.",
-        default_enabled=True,
     ),
     MCPSpec(
         key="firecrawl",
@@ -94,7 +87,6 @@ CATALOG: tuple[MCPSpec, ...] = (
         key_signup_url="https://www.firecrawl.dev",
         cost_note="500 free credits/mo; ~$0.02/page after.",
         requires_node=True,
-        default_enabled=True,
     ),
     MCPSpec(
         key="tavily",
@@ -119,7 +111,6 @@ CATALOG: tuple[MCPSpec, ...] = (
         key_signup_url="https://www.ncbi.nlm.nih.gov/account/",
         cost_note="Free. NCBI key raises rate limit (3→10 req/s).",
         requires_node=True,
-        default_enabled=True,
     ),
     MCPSpec(
         key="openalex",
@@ -133,7 +124,6 @@ CATALOG: tuple[MCPSpec, ...] = (
         key_signup_url="https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication#the-polite-pool",
         cost_note="Free. Setting OPENALEX_EMAIL with your own email upgrades to polite pool (faster).",
         requires_node=True,
-        default_enabled=True,
     ),
     MCPSpec(
         key="arxiv",
@@ -143,8 +133,7 @@ CATALOG: tuple[MCPSpec, ...] = (
         summary="arXiv search, download, full-text read with local cache.",
         transport="console_script",
         cost_note="Free.",
-        requires_uv=False,  # falls back to uvx if console script missing
-        default_enabled=True,
+        requires_uv=True,  # falls back to uvx if console script missing
     ),
     MCPSpec(
         key="wikipedia",
@@ -154,7 +143,7 @@ CATALOG: tuple[MCPSpec, ...] = (
         summary="Universal grounding — summaries, sections, related topics.",
         transport="console_script",
         cost_note="Free.",
-        default_enabled=True,
+        requires_uv=True,  # falls back to uvx if console script missing
     ),
     # ─── Docs ──────────────────────────────────────────────────────────────
     MCPSpec(
@@ -168,7 +157,6 @@ CATALOG: tuple[MCPSpec, ...] = (
         key_signup_url="https://context7.com",
         cost_note="Free without key; key raises rate limits.",
         requires_node=True,
-        default_enabled=True,
     ),
     # ─── Scrape fallback ───────────────────────────────────────────────────
     MCPSpec(
@@ -204,10 +192,6 @@ BY_KEY: dict[str, MCPSpec] = {s.key: s for s in CATALOG}
 
 def in_category(category: str) -> list[MCPSpec]:
     return [s for s in CATALOG if s.category == category]
-
-
-def default_enabled_keys() -> list[str]:
-    return [s.key for s in CATALOG if s.default_enabled]
 
 
 # Pretty labels for the wizard
