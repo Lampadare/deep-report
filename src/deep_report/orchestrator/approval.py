@@ -962,6 +962,15 @@ class ApprovalGate:
                     )
                 if decision == "stop_early":
                     return False
+                # An explicit approve is unconditional — non-empty feedback
+                # tagged onto it must NOT be re-interpreted as a replan.
+                if decision == "approve":
+                    if feedback:
+                        ui.warning(
+                            f"approve decision for gate '{gate_id}': "
+                            "ignoring feedback because approve is unconditional"
+                        )
+                    return approved
                 if allow_feedback and feedback:
                     return feedback
                 return approved
