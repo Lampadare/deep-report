@@ -1,11 +1,16 @@
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Lampadare/deep-report/main/.github/logo-dark.svg">
+  <img alt="deep-report" src="https://raw.githubusercontent.com/Lampadare/deep-report/main/.github/logo-light.svg" width="320">
+</picture>
+
 [![PyPI](https://img.shields.io/pypi/v/deep-report.svg)](https://pypi.org/project/deep-report/)
 [![Python](https://img.shields.io/pypi/pyversions/deep-report.svg)](https://pypi.org/project/deep-report/)
 [![Downloads](https://img.shields.io/pypi/dm/deep-report.svg)](https://pypi.org/project/deep-report/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Lampadare/deep-report/blob/main/LICENSE)
-[![Stars](https://img.shields.io/github/stars/Lampadare/deep-report?style=social)](https://github.com/Lampadare/deep-report)
 [![Publish](https://github.com/Lampadare/deep-report/actions/workflows/publish.yml/badge.svg)](https://github.com/Lampadare/deep-report/actions/workflows/publish.yml)
+[![Stars](https://img.shields.io/github/stars/Lampadare/deep-report?style=social)](https://github.com/Lampadare/deep-report)
 
 </div>
 
