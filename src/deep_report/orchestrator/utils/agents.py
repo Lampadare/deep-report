@@ -37,6 +37,7 @@ AGENT_TOOLS = {
         # Web search (primary: built-in + exa for full-text; brave as fallback + news)
         "WebSearch", "WebFetch",
         "mcp__exa__web_search_exa",
+        "mcp__exa__web_fetch_exa",
         "mcp__exa__get_code_context_exa",
         "mcp__exa__company_research_exa",
         "mcp__brave-search__brave_web_search",
@@ -168,12 +169,15 @@ def generate_mcp_config(report_dir: Path) -> Optional[Path]:
             "url": f"https://mcp.tavily.com/mcp/?tavilyApiKey={_url_quote(tavily_key, safe='')}",
         }
 
-    # Exa uses HTTP transport with API key passed as query parameter
+    # Exa via npx-distributed exa-mcp-server (exposes more tools than the hosted
+    # HTTP endpoint: web_search_exa, web_fetch_exa, get_code_context_exa,
+    # company_research_exa, deep_researcher_*, etc).
     exa_key = os.environ.get("EXA_API_KEY")
-    if exa_key:
+    if exa_key and has_npx:
         servers["exa"] = {
-            "type": "http",
-            "url": f"https://mcp.exa.ai/mcp?exaApiKey={_url_quote(exa_key, safe='')}",
+            "command": "npx",
+            "args": ["-y", "exa-mcp-server"],
+            "env": {"EXA_API_KEY": exa_key},
         }
 
     # Academic stack — replaces the abandoned paper-search-mcp (broken bioRxiv/medRxiv/PubMed bits)

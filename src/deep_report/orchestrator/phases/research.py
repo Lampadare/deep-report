@@ -508,6 +508,7 @@ def _build_research_prompt(
 - **WebSearch**: Quick factual lookups and general questions (returns summary + links)
 - **WebFetch**: Read a specific URL you already have (converts to markdown)
 - **mcp__exa__web_search_exa**: Deep research — returns full article text inline, not just snippets
+- **mcp__exa__web_fetch_exa**: Fetch a specific URL via Exa (full-text extraction, handles paywalls/anti-bot better than WebFetch)
 - **mcp__exa__get_code_context_exa**: Code, API docs, technical questions (GitHub, Stack Overflow, official docs)
 - **mcp__exa__company_research_exa**: Deep company intelligence (funding, team, tech stack, competitors)
 - **mcp__brave-search__brave_web_search**: Filtered web search — use freshness param for date-bounded queries
