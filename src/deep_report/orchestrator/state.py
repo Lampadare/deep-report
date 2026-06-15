@@ -15,7 +15,7 @@ from typing import Optional, Any
 from datetime import datetime
 
 try:
-    from pydantic import BaseModel, Field, ValidationError
+    from pydantic import BaseModel, ConfigDict, Field, ValidationError
     HAS_PYDANTIC = True
 except ImportError:
     HAS_PYDANTIC = False
@@ -25,6 +25,8 @@ except ImportError:
 if HAS_PYDANTIC:
     class StateValidator(BaseModel):
         """Pydantic model for state validation."""
+        model_config = ConfigDict(extra="ignore")
+
         topic: str = ""
         brief: str = ""
         report_dir: str = ""
@@ -60,9 +62,6 @@ if HAS_PYDANTIC:
         total_input_tokens: int = 0
         total_output_tokens: int = 0
         total_cost: float = 0.0
-
-        class Config:
-            extra = "ignore"
 
 
 def validate_state_data(data: dict) -> tuple[dict, list[str]]:
