@@ -35,7 +35,8 @@ import re
 import shutil
 import signal
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -567,8 +568,10 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
     # ─── Step 2: Research Settings ───
     ui.step("Step 2/4 — Research Configuration")
 
-    # Agent count - use AI recommendation if available
-    agent_default = defaults.get('agents', 10)
+    # Agent count - use AI recommendation if available. `defaults.get('agents')`
+    # can be `None` when no --agents flag was passed; coerce to 10 so the
+    # interactive prompt doesn't receive a None default.
+    agent_default = defaults.get('agents') or 10
     if recs and isinstance(recs.get("agent_count"), int):
         rec_agents = max(3, min(recs["agent_count"], 30))
         agent_default = rec_agents
@@ -749,6 +752,9 @@ Examples:
   deep-report --resume ~/reports/quantum_20260207_1430
         """
     )
+    from .. import __version__
+    parser.add_argument("--version", action="version",
+                        version=f"deep-report {__version__}")
     parser.add_argument("topic", nargs="?", help="Research topic")
     parser.add_argument("--quick", action="store_true",
                         help="Skip interview, use sensible defaults")
@@ -785,6 +791,8 @@ Examples:
                         help="Show per-agent progress, timing, retries, and error details")
     parser.add_argument("--update", action="store_true",
                         help="Update deep-report to latest version from GitHub")
+    parser.add_argument("--setup", action="store_true",
+                        help="Run the interactive MCP setup wizard (pick which servers to enable, see API key costs)")
     parser.add_argument("--setup-skill", action="store_true",
                         help="Install Claude Code skill for /deep-report command")
     parser.add_argument("--intro", action="store_true",
@@ -806,9 +814,32 @@ Examples:
 
     args = parser.parse_args()
 
+    # Reject interactive-only flags combined with --machine before running them.
+    if args.machine:
+        for flag_name, flag_value in (
+            ("--update", args.update),
+            ("--setup-skill", args.setup_skill),
+            ("--intro", args.intro),
+        ):
+            if flag_value:
+                print(
+                    f"error: {flag_name} is interactive and cannot be combined with --machine",
+                    file=sys.stderr,
+                )
+                return 2
+
     # Handle --update flag first
     if args.update:
         return update_cli()
+
+    # Handle --setup (MCP wizard) before --setup-skill since users may confuse them
+    if args.setup:
+        if args.machine:
+            print("error: --setup is interactive; not compatible with --machine",
+                  file=sys.stderr)
+            return 2
+        from .setup_wizard import run_wizard
+        return run_wizard()
 
     # Handle --setup-skill flag
     if args.setup_skill:
@@ -821,6 +852,41 @@ Examples:
     # Handle --approve subcommand: write approval response and exit
     if args.approve:
         return _handle_approve_subcommand(args)
+
+    # First-run onboarding: if the user has never configured MCPs, walk them
+    # through the wizard before kicking off a report. Skip for paths that don't
+    # need MCPs at all (--list, --delete, --resume) and for non-interactive
+    # contexts (--machine or no TTY — those fall back to env-var-only discovery).
+    if not args.machine and not args.list and not args.delete and not args.resume:
+        from .setup_wizard import CONFIG_PATH, run_wizard
+        if (not CONFIG_PATH.exists()
+                and sys.stdin.isatty()
+                and sys.stdout.isatty()):
+            ui.info("")
+            ui.info("First run detected — let's pick which MCP servers you want to use.")
+            ui.info("(deep-report drives external search/papers/scrape MCPs to research"
+                    " your topic. Nothing is pre-selected; you choose what's on.)")
+            ui.info("Run `deep-report --setup` any time to change this.")
+            ui.info("")
+            try:
+                rc = run_wizard()
+            except Exception as e:
+                ui.warning(f"Setup wizard failed ({e}) — continuing with built-in"
+                           " WebSearch/WebFetch fallback only.")
+                rc = 1
+            if rc != 0:
+                ui.warning("Setup did not complete — continuing with built-in"
+                           " WebSearch/WebFetch fallback only.")
+                ui.info("Run `deep-report --setup` later to configure.")
+                # Fail-closed: persist an empty config so the runtime discovery
+                # doesn't silently re-enable every detectable MCP. Without
+                # this, `enabled_keys()` returns None ⇒ "no config, include
+                # everything", which contradicts the user's cancellation.
+                try:
+                    from .setup_wizard import save_config
+                    save_config([], imported=None)
+                except Exception as e:
+                    ui.warning(f"Could not persist empty config: {e}")
 
     # Machine mode: silent worker. Activate before any UI calls.
     if args.machine:
@@ -1080,13 +1146,27 @@ def _handle_approve_subcommand(args) -> int:
 
     # Lock + read + validate + write atomically. Two racing --approve calls will
     # serialize on the lock; the second sees status="responded" and exits.
+    #
+    # The lock lives on a sidecar `.lock` file rather than on the data file
+    # itself, because we replace the data file via `os.replace` inside the
+    # critical section. A flock on the data file's fd points to the inode the
+    # fd was opened with — after `os.replace` swaps the inode, a second process
+    # could `flock` the stale inode in parallel and never see "responded".
+    # The sidecar's inode never changes, so the lock semantics survive.
+    lock_file = report_dir / "state" / "pending_approval.lock"
     try:
-        with open(approval_file, "r+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        with open(lock_file, "a+") as lockf:
+            fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
             try:
-                f.seek(0)
+                # Re-check existence under the lock (a concurrent run might
+                # have just resolved and removed the file).
+                if not approval_file.exists():
+                    print(f"error: no pending approval at {approval_file}",
+                          file=sys.stderr)
+                    return 2
+
                 try:
-                    request = loads(f.read())
+                    request = loads(approval_file.read_text())
                 except JSONDecodeError as e:
                     print(f"error: could not parse approval file: {e}",
                           file=sys.stderr)
@@ -1106,16 +1186,21 @@ def _handle_approve_subcommand(args) -> int:
                 request["response"] = {
                     "decision": args.decision,
                     "feedback": args.feedback or "",
-                    "responded_at": datetime.now().isoformat(),
+                    "responded_at": datetime.now(timezone.utc).isoformat(),
                 }
                 request["status"] = "responded"
 
-                # Atomic publish so the polling worker never reads a partial line.
-                tmp = approval_file.with_suffix(".tmp")
+                # Atomic publish so the polling worker never reads a partial
+                # line. PID + monotonic_ns suffix on the tmp so two writers
+                # can't trample each other (also belt-and-suspenders since the
+                # sidecar lock already serializes us).
+                tmp = approval_file.with_suffix(
+                    f".tmp.{os.getpid()}.{time.monotonic_ns()}"
+                )
                 tmp.write_text(dumps(request, indent=2))
                 os.replace(tmp, approval_file)
             finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
     except OSError as e:
         print(f"error: could not write approval response: {e}", file=sys.stderr)
         return 1
@@ -1347,7 +1432,25 @@ def setup_skill() -> int:
                 # Different symlink, remove and recreate
                 skill_target.unlink()
         else:
-            ui.warning(f"Removing existing {skill_target}")
+            # Existing real directory — confirm before destroying.
+            ui.warning(f"{skill_target} exists as a directory (not a symlink).")
+            is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+            confirmed = False
+            if is_tty and QUESTIONARY_AVAILABLE:
+                try:
+                    confirmed = questionary.confirm(
+                        f"Delete {skill_target} and replace with symlink?",
+                        default=False,
+                        style=custom_style,
+                    ).ask()
+                except Exception:
+                    confirmed = False
+            if not confirmed:
+                ui.error(
+                    f"Refusing to remove existing directory {skill_target}. "
+                    "Move or delete it manually, then re-run --setup-skill."
+                )
+                return 1
             import shutil
             shutil.rmtree(skill_target)
 
@@ -1384,21 +1487,31 @@ Claude agents in parallel, each investigating a different aspect of your topic.
 
 ---
 
-## Getting Started
+## Getting Started — Plug and Play
 
-The simplest way to start:
+The whole tool is built around one command:
 
-    deep-report "your research topic"
+    deep-report "any topic you want a deep report on"
 
-That's it! An **interactive interview** will walk you through all the options:
-- How many research agents to use
-- Which model (Sonnet or Opus)
-- Target expertise level
-- Report type (AI suggests formats tailored to your topic)
-- Whether to add seed references
+That's it. The interactive interview walks you through everything — number of
+agents, model, expertise level, report type (AI suggests formats tailored to
+your topic), and whether you want to add seed references. If you don't know
+which flags to use, **don't use any** — the interview is the main interface.
 
-**All flags are optional** - the interview covers everything. Use `--quick` only
-if you want to skip the interview and use sensible defaults.
+Want to skip the interview on repeat runs? Add `--quick`.
+
+---
+
+## First Time Running?
+
+On your first run you'll be walked through a one-time **MCP setup picker** —
+a checkbox UI for choosing which search engines, paper databases, and scraping
+tools deep-report should use. Nothing is pre-selected; pick what you want.
+
+If you already have MCP servers configured in **Claude Code**
+(`~/.claude.json`), the wizard offers to import them — no re-entering keys.
+
+Re-run any time with `deep-report --setup`.
 
 ---
 
@@ -1481,12 +1594,13 @@ your-topic_20260209_1430/
 - Reports auto-save and can be resumed with `--list`
 - Press **'v'** during execution to toggle verbose mode
 - Typical report takes 15-45 minutes depending on settings
+- Re-pick MCP servers any time with `deep-report --setup`
 
 ---
 
 Ready? Just run:
 
-    deep-report "your topic here"
+    deep-report "any topic you want a deep report on"
 
 """
 
@@ -1603,13 +1717,16 @@ def continue_from_phase(state: State, start_phase: int, ctx: OrchestratorContext
         state.save()
 
     # Set up verbose toggle (press 'v' during execution)
-    # Footer shows verbose indicator, so just toggle the flag
+    # Footer shows verbose indicator, so just toggle the flag.
+    # Skip in machine mode: no Rich Live, so the keyboard listener has nothing
+    # to redraw and would just consume stdin.
     def on_verbose_toggle(enabled: bool):
         ui.set_verbose(enabled)
 
     verbose_toggle = VerboseToggle(on_toggle=on_verbose_toggle)
-    verbose_toggle.start()
-    ui.attach_verbose_toggle(verbose_toggle)
+    if not ctx.machine_mode:
+        verbose_toggle.start()
+        ui.attach_verbose_toggle(verbose_toggle)
 
     phases = [
         (1, "Setup", lambda s: True),  # Already done if start_phase > 1

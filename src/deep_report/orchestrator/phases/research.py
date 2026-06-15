@@ -10,6 +10,7 @@ from ..utils import (
     spawn_agents_parallel,
     spawn_decision_agent,
     generate_mcp_config,
+    extend_allowed_tools_for_imports,
     AgentResult,
     AGENT_TOOLS,
     DEFAULT_TIMEOUT,
@@ -100,10 +101,13 @@ def run_research(
                 intervention_handler=intervention_handler,
             )
 
-            # on_complete already updated state + saved incrementally
-            # Persist iteration number only after batch succeeds (not before,
-            # so an interrupted batch doesn't skip the iteration on resume)
-            state.research_iteration = iteration
+            # on_complete already updated state + saved incrementally.
+            # Note: research_iteration is persisted at the END of this loop
+            # iteration (after _create_followups), not here, so a crash
+            # between batch completion and follow-up creation causes a clean
+            # re-do on resume rather than silently skipping the followup
+            # slot — get_pending_threads() filters completed threads, so the
+            # rerun batch is a no-op.
             state.checkpoint(f"research_batch_{iteration}_complete")
 
         # Summarize all unsummarized outputs (including from prior runs).
@@ -167,6 +171,8 @@ def run_research(
                 decision["_sufficient"] = sufficient
                 if not approval.iteration_gate(state, decision, iteration):
                     ui.info("Proceeding to synthesis")
+                    state.research_iteration = iteration
+                    state.checkpoint(f"research_iteration_{iteration}_complete")
                     break
 
                 # If gate approved but no follow-ups remain (user pressed Enter on
@@ -176,15 +182,26 @@ def run_research(
                 )
                 if not has_followups:
                     ui.success("No follow-up directions — proceeding to synthesis")
+                    state.research_iteration = iteration
+                    state.checkpoint(f"research_iteration_{iteration}_complete")
                     break
             else:
                 # Non-interactive: respect decision agent's assessment
                 if sufficient:
                     ui.success("Research deemed sufficient")
+                    state.research_iteration = iteration
+                    state.checkpoint(f"research_iteration_{iteration}_complete")
                     break
 
             # Create follow-up threads from decision
             _create_followups(state, decision, iteration)
+
+        # Iteration body fully complete — only NOW persist the counter so a
+        # crash between batch completion and _create_followups causes a clean
+        # re-do (resume will re-enter this same iteration; get_pending_threads
+        # returns an empty list for already-completed work).
+        state.research_iteration = iteration
+        state.checkpoint(f"research_iteration_{iteration}_complete")
 
     state.checkpoint("research_complete")
     state.mark_phase_complete(3)
@@ -238,10 +255,13 @@ def _run_research_batch(
 
     report_dir = Path(state.report_dir)
 
-    # Generate MCP config once per batch; select tool preset accordingly
+    # Generate MCP config once per batch; select tool preset accordingly.
+    # Catalog tools come from AGENT_TOOLS; CC-imported MCPs need a wildcard
+    # `mcp__<name>` allow entry tacked on at spawn time, otherwise the strict
+    # allowedTools allowlist denies every call into the imported server.
     mcp_config = generate_mcp_config(report_dir)
     if mcp_config:
-        tool_preset = AGENT_TOOLS["research"]
+        tool_preset = extend_allowed_tools_for_imports(AGENT_TOOLS["research"])
         ui.verbose(f"MCP config written to {mcp_config}")
     else:
         tool_preset = AGENT_TOOLS["research_fallback"]
@@ -386,18 +406,33 @@ def _run_research_batch(
                 elif name.startswith("mcp__exa__"):
                     query = data.get("query", "")[:80]
                     ui.verbose(f"{thread_id} Exa: {query}")
-                elif name.startswith("mcp__paper-search__"):
+                elif name.startswith("mcp__tavily__"):
                     query = data.get("query", "")[:80]
-                    ui.verbose(f"{thread_id} Papers: {name.split('__')[-1]}: {query}")
+                    ui.verbose(f"{thread_id} Tavily: {query}")
+                elif name.startswith("mcp__arxiv__"):
+                    query = (data.get("query") or data.get("paper_id") or "")[:80]
+                    ui.verbose(f"{thread_id} arXiv: {name.split('__')[-1]}: {query}")
+                elif name.startswith("mcp__pubmed__"):
+                    query = (data.get("query") or data.get("pmid") or "")[:80]
+                    ui.verbose(f"{thread_id} PubMed: {name.split('__')[-1]}: {query}")
+                elif name.startswith("mcp__openalex__"):
+                    query = (data.get("query") or "")[:80]
+                    ui.verbose(f"{thread_id} OpenAlex: {name.split('__')[-1]}: {query}")
+                elif name.startswith("mcp__wikipedia__"):
+                    query = (data.get("query") or data.get("title") or "")[:80]
+                    ui.verbose(f"{thread_id} Wikipedia: {query}")
+                elif name.startswith("mcp__context7__"):
+                    query = (data.get("libraryName") or data.get("libraryId") or "")[:80]
+                    ui.verbose(f"{thread_id} Context7: {query}")
                 elif name.startswith("mcp__firecrawl__"):
                     url = data.get("url", "")[:80]
                     ui.verbose(f"{thread_id} Firecrawl: {url}")
                 elif name.startswith("mcp__crawl4ai__"):
                     url = data.get("url", "")[:80]
                     ui.verbose(f"{thread_id} Crawl4AI: {url}")
-                elif name.startswith("mcp__digikey__"):
-                    kw = data.get("keywords", "")[:80]
-                    ui.verbose(f"{thread_id} DigiKey: {kw}")
+                elif name.startswith("mcp__playwright__"):
+                    url = data.get("url", "")[:80]
+                    ui.verbose(f"{thread_id} Playwright: {name.split('__')[-1]}: {url}")
                 elif name == "Write":
                     path = data.get("file_path", "")
                     fname = path.split("/")[-1] if "/" in path else path
@@ -416,19 +451,24 @@ def _run_research_batch(
     # Log full agent conversations to logs/ for debugging
     log_dir = report_dir / "logs" / f"iteration_{iteration}"
 
-    results = spawn_agents_parallel(tasks, max_workers=max_workers, on_complete=on_complete,
-                                     intervention_handler=intervention_handler,
-                                     stream_callback_factory=make_stream_cb,
-                                     stagger_secs=60.0,
-                                     log_dir=log_dir)
-    ui.research_table_complete()
-
-    # Clean up mcp.json (contains API keys)
-    if mcp_config:
-        try:
-            mcp_config.unlink(missing_ok=True)
-        except OSError:
-            pass
+    try:
+        results = spawn_agents_parallel(tasks, max_workers=max_workers, on_complete=on_complete,
+                                         intervention_handler=intervention_handler,
+                                         stream_callback_factory=make_stream_cb,
+                                         stagger_secs=60.0,
+                                         log_dir=log_dir)
+        ui.research_table_complete()
+    finally:
+        # Clean up mcp.json (plaintext API keys) — runs even on
+        # KeyboardInterrupt / unexpected exception so the file doesn't
+        # linger on disk after a crash. spawn_agents_parallel's executor
+        # blocks until every child exits, so by the time we get here the
+        # children have already finished reading mcp.json.
+        if mcp_config:
+            try:
+                mcp_config.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # #14: Print failure summary
     failed_results = {tid: r for tid, r in results.items() if not r.success}
@@ -468,25 +508,34 @@ def _build_research_prompt(
 - **WebSearch**: Quick factual lookups and general questions (returns summary + links)
 - **WebFetch**: Read a specific URL you already have (converts to markdown)
 - **mcp__exa__web_search_exa**: Deep research — returns full article text inline, not just snippets
-- **mcp__exa__get_code_context_exa**: Code, API docs, technical questions (searches GitHub, Stack Overflow, official docs)
+- **mcp__exa__web_fetch_exa**: Fetch a specific URL via Exa (full-text extraction, handles paywalls/anti-bot better than WebFetch)
+- **mcp__exa__get_code_context_exa**: Code, API docs, technical questions (GitHub, Stack Overflow, official docs)
 - **mcp__exa__company_research_exa**: Deep company intelligence (funding, team, tech stack, competitors)
-- **mcp__brave-search__brave_web_search**: Filtered search — use freshness param for date-bounded queries
+- **mcp__brave-search__brave_web_search**: Filtered web search — use freshness param for date-bounded queries
 - **mcp__brave-search__brave_news_search**: Breaking/recent news with time control (freshness defaults to 24h)
-- **mcp__paper-search__search_arxiv**: Search arXiv preprints (use specific/narrow queries)
-- **mcp__paper-search__search_pubmed**: Search PubMed (best academic search — biomedical/clinical)
-- **mcp__paper-search__read_arxiv_paper**: Read full arXiv paper text (large output — be selective)
-- **mcp__paper-search__read_medrxiv_paper**: Read full medRxiv paper text
+- **mcp__tavily__tavily_search**: Agent-optimized search; **mcp__tavily__tavily_extract**: clean page extract
+- **mcp__arxiv__search_papers** / **read_paper** / **download_paper**: arXiv preprints (CS/ML/physics/math)
+- **mcp__pubmed__pubmed_search_articles**: PubMed search (biomedical/clinical)
+- **mcp__pubmed__pubmed_europepmc_search**: Europe PMC search — also covers bioRxiv/medRxiv preprints
+- **mcp__pubmed__pubmed_fetch_fulltext** / **pubmed_fetch_articles**: Full-text via PMC/Europe PMC + Unpaywall
+- **mcp__openalex__openalex_search_entities**: 270M scholarly works across all disciplines + citation graph
+- **mcp__openalex__openalex_get_citation_graph**: Citations into/out of a given paper
+- **mcp__wikipedia__search_wikipedia** / **get_summary** / **get_article**: Universal grounding
+- **mcp__context7__resolve-library-id** / **query-docs**: Version-pinned library/API docs (essential for tech topics)
 - **mcp__firecrawl__firecrawl_scrape**: Clean page extraction (supports onlyMainContent, JS actions)
 - **mcp__crawl4ai__scrape**: Free backup page fetcher with stealth browsing
+- **mcp__playwright__browser_navigate** + **browser_snapshot**: JS-heavy / anti-bot scrape fallback
 
 ## Search Strategy
-1. Start with **WebSearch** for quick factual queries or **mcp__exa__web_search_exa** for deep research
-2. Use **mcp__exa__get_code_context_exa** for code/API/technical documentation questions
+1. Start with **WebSearch** for quick factual queries, **mcp__exa__web_search_exa** for deep research with full text, or **mcp__tavily__tavily_search** for agent-optimized results
+2. Use **mcp__exa__get_code_context_exa** or **mcp__context7__query-docs** for code/API/library documentation questions
 3. Use **mcp__brave-search__brave_news_search** for recent events or news-sensitive topics
-4. Use **mcp__paper-search__search_pubmed** for biomedical/clinical literature
-5. Use **mcp__paper-search__search_arxiv** for CS/ML/physics preprints (use narrow queries)
-6. Use **mcp__firecrawl__firecrawl_scrape** to fetch specific web pages; **mcp__crawl4ai__scrape** as backup
-7. Use **WebFetch** for lightweight page reads when you just need a summary of a URL"""
+4. Use **mcp__pubmed__pubmed_search_articles** for biomedical/clinical literature; **pubmed_europepmc_search** for preprints (bioRxiv/medRxiv) and broader EPMC coverage
+5. Use **mcp__arxiv__search_papers** for CS/ML/physics/math preprints (use narrow queries) and **mcp__arxiv__read_paper** when you need full text
+6. Use **mcp__openalex__openalex_search_entities** to discover works across all disciplines and **openalex_get_citation_graph** for citation networks
+7. Use **mcp__wikipedia__search_wikipedia** + **get_summary** for grounding and authoritative entity overviews
+8. Use **mcp__firecrawl__firecrawl_scrape** to fetch specific web pages; **mcp__playwright__browser_navigate**+**browser_snapshot** for JS-heavy / anti-bot pages; **mcp__crawl4ai__scrape** as alternative
+9. Use **WebFetch** for lightweight page reads when you just need a summary of a URL"""
     else:
         search_section = """## Search Tools
 Use WebSearch and WebFetch to find authoritative sources.

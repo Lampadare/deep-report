@@ -23,7 +23,12 @@ def run_synthesize(state: State) -> bool:
     state.checkpoint("synthesize_started")
 
     report_dir = Path(state.report_dir)
-    agent_count = len(state.completed_threads) + len([f for f in state.followups if f.get("status") == "completed"])
+    # Followup IDs already land in `state.completed_threads` via the research
+    # completion handler, so adding completed-followup count here would
+    # double-count and push the report past the multi-pass threshold
+    # unnecessarily. Use the unique set of completed thread IDs as the
+    # ground-truth count.
+    agent_count = len(set(state.completed_threads))
 
     # Guard: need at least some completed research
     if agent_count == 0:
@@ -94,8 +99,16 @@ def _single_pass_synthesis(state: State, report_dir: Path) -> bool:
     full_dir = report_dir / "full" / "agents"
     report_file = report_dir / "report.md"
 
-    # Gather file paths - agent will read them
-    research_files = sorted(full_dir.glob("*.md"))
+    # Gather file paths — restrict to threads we actually marked as completed
+    # so partial files left behind by timed-out / failed agents aren't fed in
+    # as if they were valid research.
+    completed = set(state.completed_threads)
+    all_files = sorted(full_dir.glob("*.md"))
+    research_files = [f for f in all_files if f.stem in completed]
+    skipped = [f.stem for f in all_files if f.stem not in completed]
+    if skipped:
+        ui.warning(f"Skipping {len(skipped)} agent output(s) not in completed_threads: "
+                   f"{', '.join(skipped[:5])}{'…' if len(skipped) > 5 else ''}")
     if not research_files:
         ui.error("Synthesis failed: no research files found")
         return False
@@ -218,15 +231,27 @@ def _multi_pass_synthesis(state: State, report_dir: Path) -> bool:
 def _cluster_threads(state: State, summaries_dir: Path) -> list[dict]:
     """Cluster research threads into thematic groups."""
 
-    # Gather all thread summaries
+    # Gather thread summaries — only for threads that actually completed.
+    # Partial summaries left behind by timed-out / failed agents would
+    # otherwise be fed into clustering and downstream cluster synthesis.
+    completed = set(state.completed_threads)
     thread_summaries = []
+    skipped_summaries = []
     for f in sorted(summaries_dir.glob("*_summary.md")):
         thread_id = f.stem.replace("_summary", "")
+        if thread_id not in completed:
+            skipped_summaries.append(thread_id)
+            continue
         try:
             content = f.read_text()[:500]
             thread_summaries.append(f"{thread_id}: {content}")
         except (OSError, IOError) as e:
             ui.warning(f"Summary reading failed for {f.name}: {e}")
+    if skipped_summaries:
+        ui.warning(f"Skipping {len(skipped_summaries)} summary file(s) "
+                   f"not in completed_threads: "
+                   f"{', '.join(skipped_summaries[:5])}"
+                   f"{'…' if len(skipped_summaries) > 5 else ''}")
 
     num_clusters = min(5, max(2, len(thread_summaries) // 4))
 
@@ -265,10 +290,36 @@ Group related threads together. Every thread must be assigned to exactly one clu
     if result.success:
         data = extract_json(result.output)
         if data:
-            return data.get("clusters", [])
+            # The cluster agent occasionally hallucinates or echoes thread IDs
+            # that aren't in `completed`. Validate every returned thread_id so
+            # downstream _synthesize_clusters can't read partial-agent files.
+            raw_clusters = data.get("clusters", []) or []
+            cleaned: list[dict] = []
+            dropped_ids: list[str] = []
+            for cluster in raw_clusters:
+                tids = cluster.get("thread_ids") or []
+                kept = [tid for tid in tids if tid in completed]
+                bad = [tid for tid in tids if tid not in completed]
+                if bad:
+                    dropped_ids.extend(bad)
+                if kept:
+                    cleaned.append({**cluster, "thread_ids": kept})
+            if dropped_ids:
+                ui.warning(f"Cluster agent returned {len(dropped_ids)} non-completed "
+                           f"thread_id(s); dropping: "
+                           f"{', '.join(dropped_ids[:5])}"
+                           f"{'…' if len(dropped_ids) > 5 else ''}")
+            if cleaned:
+                return cleaned
+            # If every cluster came back empty after validation, fall through
+            # to the deterministic even-split fallback below.
 
-    # Fallback: even split
-    all_threads = [f.stem.replace("_summary", "") for f in sorted(summaries_dir.glob("*_summary.md"))]
+    # Fallback: even split, restricted to completed threads.
+    all_threads = [
+        f.stem.replace("_summary", "")
+        for f in sorted(summaries_dir.glob("*_summary.md"))
+        if f.stem.replace("_summary", "") in completed
+    ]
     clusters = []
     chunk_size = max(1, len(all_threads) // num_clusters)
 

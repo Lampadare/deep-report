@@ -2,7 +2,7 @@
 name: deep-report
 description: Generates multi-agent research reports by orchestrating the deep-report CLI. Use when the user asks for a "deep report", a "research report on X", or invokes /deep-report. The CLI is a long-running worker; this skill drives it via state/progress.jsonl and AskUserQuestion for any user interaction.
 model: opus
-argument-hint: "[topic] [--quick | --customize] [--agents N] [--model opus] [--audio]"
+argument-hint: "[topic] [--quick] [--agents N] [--model opus] [--audio]"
 allowed-tools: Read Write Glob Grep AskUserQuestion Monitor Bash(deep-report *) Bash(mkdir *) Bash(tail *) Bash(grep *)
 ---
 

@@ -264,9 +264,12 @@ class DeepReportUI:
 
     def _update_title(self, text: str):
         """Update terminal window title."""
-        if sys.stdout.isatty():
-            sys.stdout.write(f"\033]0;{text}\007")
-            sys.stdout.flush()
+        # Machine-mode contract: no ANSI on stdout. Skip even if a driver
+        # happens to attach a pty (making isatty() True).
+        if self._machine_mode or not sys.stdout.isatty():
+            return
+        sys.stdout.write(f"\033]0;{text}\007")
+        sys.stdout.flush()
 
     def header(self, title: str, subtitle: str = ""):
         """Print a styled header."""
@@ -295,6 +298,9 @@ class DeepReportUI:
 
     def interview_header(self):
         """Show colorful banner for configure mode."""
+        # Machine mode never clears the screen — the driver consumes stdout.
+        if self._machine_mode:
+            return
         if RICH_AVAILABLE:
             if sys.stdout.isatty():
                 self.console.clear()
@@ -1049,6 +1055,13 @@ class DeepReportUI:
         Returns:
             Path to selected report, or None if cancelled
         """
+        # Machine mode has no interactive driver attached to stdin — bail
+        # before any questionary or input() call could hang the process.
+        # Write to stderr so we don't pollute the machine-mode stdout contract.
+        if self._machine_mode:
+            print("error: report_picker is interactive — not available in --machine mode",
+                  file=sys.stderr)
+            return None
         from pathlib import Path
         from datetime import datetime
 
@@ -1129,6 +1142,13 @@ class DeepReportUI:
         Returns:
             Path to selected report, or None if cancelled
         """
+        # Machine mode has no driver hooked to stdin — bail before any
+        # interactive call (questionary or input()) can hang the process.
+        # Write to stderr so we don't pollute the machine-mode stdout contract.
+        if self._machine_mode:
+            print("error: report_picker_for_delete is interactive — not available in --machine mode",
+                  file=sys.stderr)
+            return None
         from pathlib import Path
         from datetime import datetime
 
