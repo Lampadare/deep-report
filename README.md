@@ -4,8 +4,8 @@
 [![Python](https://img.shields.io/pypi/pyversions/deep-report.svg)](https://pypi.org/project/deep-report/)
 [![Downloads](https://img.shields.io/pypi/dm/deep-report.svg)](https://pypi.org/project/deep-report/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Lampadare/deep-report/blob/main/LICENSE)
-[![Stars](https://img.shields.io/github/stars/Lampadare/deep-report?style=social)](https://github.com/Lampadare/deep-report)
 [![Publish](https://github.com/Lampadare/deep-report/actions/workflows/publish.yml/badge.svg)](https://github.com/Lampadare/deep-report/actions/workflows/publish.yml)
+[![Stars](https://img.shields.io/github/stars/Lampadare/deep-report?style=social)](https://github.com/Lampadare/deep-report)
 
 </div>
 
