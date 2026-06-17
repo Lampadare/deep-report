@@ -31,6 +31,11 @@ pipx install deep-report
 Requires Python 3.11+ and [Claude Code](https://claude.ai/download) installed
 and authenticated.
 
+**On Windows**, run from **Windows Terminal**, **PowerShell**, or **cmd.exe** —
+the interactive wizard relies on raw arrow-key input. **Git Bash / MSYS2** breaks
+arrow keys (all keys map to "toggle current row"); use one of the supported
+shells instead.
+
 ## Use
 
 Just run it with a topic — that's the whole thing:
