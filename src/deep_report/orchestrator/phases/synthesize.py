@@ -86,7 +86,7 @@ def _poll_output_file(path: Path, stop_event: threading.Event, word_count_ref: l
     while not stop_event.wait(interval):
         try:
             if path.exists():
-                word_count = len(path.read_text().split())
+                word_count = len(path.read_text(encoding='utf-8', errors='replace').split())
                 if word_count > 0:
                     word_count_ref[0] = word_count
         except (OSError, IOError, UnicodeDecodeError, ValueError):
@@ -243,7 +243,7 @@ def _cluster_threads(state: State, summaries_dir: Path) -> list[dict]:
             skipped_summaries.append(thread_id)
             continue
         try:
-            content = f.read_text()[:500]
+            content = f.read_text(encoding='utf-8', errors='replace')[:500]
             thread_summaries.append(f"{thread_id}: {content}")
         except (OSError, IOError) as e:
             ui.warning(f"Summary reading failed for {f.name}: {e}")
@@ -548,7 +548,7 @@ def _assemble_report(report_file: Path, header_file: Path, parts: list[dict], co
     # Header
     if header_file.exists():
         try:
-            sections.append(header_file.read_text())
+            sections.append(header_file.read_text(encoding='utf-8', errors='replace'))
         except (OSError, IOError) as e:
             ui.warning(f"Header reading failed: {e}")
 
@@ -557,7 +557,7 @@ def _assemble_report(report_file: Path, header_file: Path, parts: list[dict], co
         part_file = Path(p["file"])
         if part_file.exists():
             try:
-                content = part_file.read_text()
+                content = part_file.read_text(encoding='utf-8', errors='replace')
                 sections.append(f"\n\n---\n\n# {p['title']}\n\n{content}")
             except (OSError, IOError) as e:
                 ui.warning(f"Part file reading failed for {part_file.name}: {e}")
@@ -567,7 +567,7 @@ def _assemble_report(report_file: Path, header_file: Path, parts: list[dict], co
     # Conclusion
     if conclusion_file.exists():
         try:
-            sections.append(f"\n\n---\n\n{conclusion_file.read_text()}")
+            sections.append(f"\n\n---\n\n{conclusion_file.read_text(encoding='utf-8', errors='replace')}")
         except (OSError, IOError) as e:
             ui.warning(f"Conclusion reading failed: {e}")
 
@@ -578,7 +578,7 @@ def _assemble_report(report_file: Path, header_file: Path, parts: list[dict], co
         raise RuntimeError("Report assembly failed: no content sections available")
 
     try:
-        report_file.write_text("\n".join(sections))
+        report_file.write_text("\n".join(sections), encoding='utf-8')
     except (OSError, PermissionError) as e:
         ui.error(f"Report writing failed: {e}")
         raise
@@ -648,7 +648,7 @@ def _generate_audio(state: State, report_dir: Path):
         ui.info("Using streaming multi-pass audio generation")
         # Read in chunks for multi-pass, which already handles large reports
         try:
-            report_content = report_file.read_text()
+            report_content = report_file.read_text(encoding='utf-8', errors='replace')
         except (OSError, IOError) as e:
             ui.warning(f"Audio conversion failed: could not read report: {e}")
             return
@@ -657,7 +657,7 @@ def _generate_audio(state: State, report_dir: Path):
 
     # Check report size
     try:
-        report_content = report_file.read_text()
+        report_content = report_file.read_text(encoding='utf-8', errors='replace')
     except (OSError, IOError) as e:
         ui.warning(f"Audio conversion failed: could not read report: {e}")
         return
@@ -771,13 +771,13 @@ CRITICAL: You MUST call Write tool with file_path="{part_file}" to save.
         temp_files.append(part_file)
         if part_file.exists():
             try:
-                audio_parts.append(part_file.read_text())
+                audio_parts.append(part_file.read_text(encoding='utf-8', errors='replace'))
             except Exception as e:
                 ui.warning(f"Audio part {i} reading failed: {e}")
 
     if audio_parts:
         try:
-            audio_file.write_text("\n\n---\n\n".join(audio_parts))
+            audio_file.write_text("\n\n---\n\n".join(audio_parts), encoding='utf-8')
         except (OSError, PermissionError) as e:
             ui.warning(f"Audio file writing failed: {e}")
 

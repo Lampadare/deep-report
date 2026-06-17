@@ -311,7 +311,7 @@ def _write_manifest(state: State):
     # manifest.json and break --resume / --list discovery.
     manifest_path = Path(state.report_dir) / "state" / "manifest.json"
     tmp_path = manifest_path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(manifest, indent=2))
+    tmp_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
     os.replace(tmp_path, manifest_path)
 
 
@@ -548,7 +548,7 @@ def _summarize_seeds(state: State):
         # Read content here and pass directly. Narrow the catch so signals
         # and programming errors aren't silently swallowed.
         try:
-            content = seed_file.read_text()
+            content = seed_file.read_text(encoding='utf-8', errors='replace')
         except (OSError, UnicodeDecodeError) as e:
             ui.warning(f"Seed file reading failed for {seed_file}: {e}")
             continue
@@ -614,7 +614,7 @@ def _write_scope(state: State):
     if summaries_dir.exists():
         for f in summaries_dir.glob("*.md"):
             try:
-                content = f.read_text()[:2000]  # Limit per seed
+                content = f.read_text(encoding='utf-8', errors='replace')[:2000]  # Limit per seed
                 seed_context += f"\n### {f.stem}\n{content}\n"
             except (OSError, IOError) as e:
                 ui.warning(f"Seed summary reading failed for {f.name}: {e}")
@@ -665,5 +665,5 @@ CRITICAL: You MUST call Write tool with file_path="{scope_file}" to save the sco
 """
         scope_tmp = scope_file.with_suffix(".md.tmp")
         scope_file.parent.mkdir(parents=True, exist_ok=True)
-        scope_tmp.write_text(minimal)
+        scope_tmp.write_text(minimal, encoding='utf-8')
         os.replace(scope_tmp, scope_file)

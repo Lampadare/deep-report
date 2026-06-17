@@ -141,7 +141,7 @@ class PaperDownloader:
             return self.results
 
         # Extract URLs
-        content = refs_file.read_text()
+        content = refs_file.read_text(encoding='utf-8', errors='replace')
         urls = self.extract_urls(content)
         print(f"Found {len(urls)} URLs in references")
 
@@ -218,7 +218,7 @@ class PaperDownloader:
             },
             "details": self.results,
         }
-        report_file.write_text(json.dumps(report, indent=2))
+        report_file.write_text(json.dumps(report, indent=2), encoding='utf-8')
 
     def get_summary(self) -> str:
         """Get a human-readable summary of downloads."""

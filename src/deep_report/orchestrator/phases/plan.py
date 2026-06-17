@@ -34,7 +34,7 @@ def run_plan(state: State) -> bool:
     scope_file = report_dir / "state" / "scope.md"
     scope_content = ""
     if scope_file.exists():
-        scope_content = scope_file.read_text()
+        scope_content = scope_file.read_text(encoding='utf-8', errors='replace')
 
     # Read seed summaries for context
     seed_context = _gather_seed_summaries(report_dir)
@@ -110,7 +110,7 @@ def _gather_seed_summaries(report_dir: Path) -> str:
     context = []
     for f in summaries_dir.glob("*.md"):
         try:
-            content = f.read_text()[:1500]
+            content = f.read_text(encoding='utf-8', errors='replace')[:1500]
             context.append(f"### {f.stem}\n{content}")
         except (OSError, IOError) as e:
             ui.warning(f"Failed to read seed file {f.name}: {e}")
@@ -313,7 +313,7 @@ def _write_plan_file(state: State, plan: dict, plan_file: Path):
         lines.append("")
 
     try:
-        plan_file.write_text("\n".join(lines))
+        plan_file.write_text("\n".join(lines), encoding='utf-8')
     except (OSError, PermissionError) as e:
         raise OSError(f"Failed to write plan file: {e}") from e
 
@@ -327,7 +327,7 @@ def replan_with_feedback(state: State, feedback: str) -> bool:
     report_dir = Path(state.report_dir)
 
     scope_file = report_dir / "state" / "scope.md"
-    scope_content = scope_file.read_text() if scope_file.exists() else ""
+    scope_content = scope_file.read_text(encoding='utf-8', errors='replace') if scope_file.exists() else ""
     seed_context = _gather_seed_summaries(report_dir)
 
     ui.step("Re-generating research plan with feedback")
