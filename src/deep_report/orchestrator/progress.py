@@ -5,10 +5,10 @@ Writes progress updates as JSON-lines for structured parsing.
 Also supports legacy .log format for backwards compatibility.
 """
 
-import fcntl
 import json
 import os
 import time
+import portalocker
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
@@ -44,7 +44,7 @@ class ProgressWriter:
     def _write_event(self, event_type: str, data: dict):
         """Write a JSON-lines event durably.
 
-        fcntl.flock is advisory (writers cooperate) but readers like `tail -F`
+        portalocker.lock is advisory on POSIX (writers cooperate) but readers like `tail -F`
         don't honor it. We build the full line in memory and do a single
         os.write inside the lock — POSIX guarantees write atomicity up to
         PIPE_BUF (typically 4 KB). Long ``summary`` payloads or large
@@ -73,8 +73,8 @@ class ProgressWriter:
         # fd is owned by this function from here — close unconditionally.
         try:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            except OSError as e:
+                portalocker.lock(fd, portalocker.LOCK_EX)
+            except (OSError, portalocker.LockException) as e:
                 print(f"Warning: Could not lock progress file: {e}")
                 return
             try:
@@ -87,8 +87,8 @@ class ProgressWriter:
                 print(f"Warning: Could not write progress: {e}")
             finally:
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                except OSError:
+                    portalocker.unlock(fd)
+                except (OSError, portalocker.LockException):
                     pass  # unlock is best-effort — close will release anyway
         finally:
             os.close(fd)
@@ -97,12 +97,12 @@ class ProgressWriter:
         """Write to legacy log format for backwards compatibility."""
         try:
             with open(self.legacy_file, "a") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                portalocker.lock(f.fileno(), portalocker.LOCK_EX)
                 try:
                     f.write(f"[{self._elapsed()}] {line}\n")
                     f.flush()
                 finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    portalocker.unlock(f.fileno())
         except OSError:
             pass
 

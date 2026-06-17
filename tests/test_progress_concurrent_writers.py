@@ -8,7 +8,7 @@ A third test covers fd cleanup when flock raises, since _write_event opens an
 unmanaged fd before locking.
 """
 
-import fcntl
+import portalocker
 import json
 import os
 import resource
@@ -88,9 +88,9 @@ def test_concurrent_writes_no_truncation(tmp_path):
 
 
 def test_fd_close_on_exception(tmp_path):
-    """If flock raises, _write_event must still close the fd it opened.
+    """If the lock acquire raises, _write_event must still close the fd it opened.
 
-    We patch fcntl.flock at the module level so the LOCK_EX call inside
+    We patch portalocker.lock at the module level so the LOCK_EX call inside
     _write_event raises OSError. The function should log a warning and return,
     but must not leak the fd opened just above. We sample the open-fd count
     before and after a burst of failing writes and assert no growth.
@@ -106,16 +106,16 @@ def test_fd_close_on_exception(tmp_path):
 
     baseline = _open_fd_count()
 
-    real_flock = fcntl.flock
+    real_lock = portalocker.lock
 
-    def _flaky_flock(fd, op):
+    def _flaky_lock(fd, op):
         # Only fail the exclusive lock acquire; let unlocks (if reached) pass.
-        if op & fcntl.LOCK_EX:
-            raise OSError("simulated flock failure")
-        return real_flock(fd, op)
+        if op & portalocker.LOCK_EX:
+            raise OSError("simulated lock failure")
+        return real_lock(fd, op)
 
-    with mock.patch("deep_report.orchestrator.progress.fcntl.flock",
-                    side_effect=_flaky_flock):
+    with mock.patch("deep_report.orchestrator.progress.portalocker.lock",
+                    side_effect=_flaky_lock):
         for _ in range(200):
             pw.update(phase=1, step="boom")
 
