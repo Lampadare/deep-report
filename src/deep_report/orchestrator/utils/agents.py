@@ -5,6 +5,7 @@ Handles spawning Claude agents via CLI and collecting their outputs.
 """
 
 import subprocess
+import signal
 import json
 import os
 import shutil
@@ -28,6 +29,75 @@ DEFAULT_TIMEOUT = 5400  # 90 minutes for research/synthesis
 DECISION_TIMEOUT = 1080  # 18 minutes
 SUMMARY_TIMEOUT = 1620   # 27 minutes
 PLANNING_TIMEOUT = 1620  # 27 minutes
+
+
+_IS_WINDOWS = sys.platform == 'win32'
+
+
+def _resolve_claude_binary() -> str:
+    """Find the claude CLI. Returns absolute path or 'claude' as fallback.
+
+    On Windows, npm installs the CLI as claude.cmd; shutil.which handles PATHEXT
+    but only if called explicitly.
+    """
+    for name in ('claude', 'claude.cmd', 'claude.exe'):
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+    return 'claude'  # let subprocess fail with a clear error
+
+
+def _popen_new_process_group_kwargs() -> dict:
+    """Return Popen kwargs that create a new process group, cross-platform."""
+    if _IS_WINDOWS:
+        # CREATE_NEW_PROCESS_GROUP = 0x00000200
+        return {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {'start_new_session': True}
+
+
+def _terminate_process_group(proc) -> None:
+    """Kill the process and its children, cross-platform."""
+    if _IS_WINDOWS:
+        try:
+            # taskkill /T kills the process tree, /F forces it
+            subprocess.run(
+                ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
+                capture_output=True, timeout=5,
+            )
+        except (subprocess.SubprocessError, FileNotFoundError, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (OSError, ProcessLookupError, AttributeError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+
+def _terminate_process_group_signal(proc, sig) -> None:
+    """Send a signal to the process group, cross-platform.
+
+    On Windows, falls back to terminate()/kill() since SIGTERM-style group
+    signalling isn't supported the same way.
+    """
+    if _IS_WINDOWS:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except (OSError, ProcessLookupError, AttributeError):
+            try:
+                proc.terminate()
+            except OSError:
+                pass
 
 
 # Tool access presets for different agent roles
@@ -488,21 +558,16 @@ class ProcessTracker:
 
     def shutdown(self, timeout: float = 10.0):
         """SIGTERM all tracked processes, wait, then SIGKILL survivors."""
-        import signal as _signal
         acquired = self._lock.acquire(timeout=1)
         try:
             self._shutting_down = True
-            pids = list(self._processes.keys())
             procs = list(self._processes.values())
         finally:
             if acquired:
                 self._lock.release()
 
-        for pid in pids:
-            try:
-                os.killpg(os.getpgid(pid), _signal.SIGTERM)
-            except (OSError, ProcessLookupError):
-                pass
+        for proc in procs:
+            _terminate_process_group_signal(proc, signal.SIGTERM)
 
         deadline = time.time() + timeout
         for proc in procs:
@@ -512,11 +577,8 @@ class ProcessTracker:
             except subprocess.TimeoutExpired:
                 pass
 
-        for pid in pids:
-            try:
-                os.killpg(os.getpgid(pid), _signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
+        for proc in procs:
+            _terminate_process_group(proc)
 
         acquired = self._lock.acquire(timeout=1)
         try:
@@ -703,8 +765,8 @@ def _spawn_agent_impl(
             duration_secs=0.0
         )
 
-    # Build the command
-    cmd = ["claude", "--print", "--model", model]
+    # Build the command (resolve claude binary for Windows .cmd shims)
+    cmd = [_resolve_claude_binary(), "--print", "--model", model]
 
     # Use stream-json when we have a callback OR a log file (for full conversation capture)
     use_streaming = stream_callback is not None or log_file is not None
@@ -733,14 +795,23 @@ def _spawn_agent_impl(
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_fh = open(log_file, "w", encoding="utf-8")
 
+        # Ensure child claude inherits UTF-8 stdio so JSON-stream decoding works
+        # consistently across platforms (Windows defaults to cp1252 otherwise).
+        child_env = os.environ.copy()
+        child_env['PYTHONIOENCODING'] = 'utf-8'
+
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             cwd=cwd or os.getcwd(),
-            start_new_session=True,  # Create new process group for clean termination
+            env=child_env,
+            # Create new process group for clean termination (cross-platform)
+            **_popen_new_process_group_kwargs(),
         )
         process_tracker.register(process)
         try:
@@ -758,16 +829,14 @@ def _spawn_agent_impl(
                         log_fh.write(f"\n--- STDERR ---\n{stderr}")
         except subprocess.TimeoutExpired:
             # Kill the entire process group to ensure all children are terminated
-            import signal
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                # Fallback if process group kill fails
-                process.kill()
+            _terminate_process_group(process)
             try:
                 process.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                process.kill()
+                try:
+                    process.kill()
+                except OSError:
+                    pass
             return AgentResult(
                 success=False,
                 output="",
