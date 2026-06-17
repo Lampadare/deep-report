@@ -4,11 +4,11 @@
 Provides persistent, auto-saving state that survives crashes and enables resumption.
 """
 
-import fcntl
 import json
 import os
 import tempfile
 import threading
+import portalocker
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Any
@@ -215,13 +215,13 @@ class State:
                 )
                 try:
                     with os.fdopen(fd, 'w') as f:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                        portalocker.lock(f.fileno(), portalocker.LOCK_EX)
                         try:
                             f.write(json.dumps(data, indent=2, default=json_default))
                             f.flush()
                             os.fsync(f.fileno())
                         finally:
-                            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                            portalocker.unlock(f.fileno())
                     os.rename(tmp_path, self._state_file)
                 except Exception:
                     # Clean up temp file on error
@@ -244,11 +244,11 @@ class State:
         if state_file.exists():
             try:
                 with open(state_file, 'r') as f:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                    portalocker.lock(f.fileno(), portalocker.LOCK_SH)
                     try:
                         data = json.load(f)
                     finally:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                        portalocker.unlock(f.fileno())
 
                 # Validate and sanitize data
                 validated_data, warnings = validate_state_data(data)

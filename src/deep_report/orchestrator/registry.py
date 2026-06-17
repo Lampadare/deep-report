@@ -2,9 +2,9 @@
 """Central registry for tracking all deep-report runs."""
 
 import json
-import fcntl
 import os
 import tempfile
+import portalocker
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -73,10 +73,10 @@ class ReportRegistry:
             self.LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
             lock_fd = os.open(str(self.LOCK_FILE), os.O_CREAT | os.O_RDWR)
             try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                portalocker.lock(lock_fd, portalocker.LOCK_EX)
                 yield
             finally:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                portalocker.unlock(lock_fd)
                 os.close(lock_fd)
 
         return _lock_ctx()

@@ -1146,11 +1146,11 @@ def _handle_approve_subcommand(args) -> int:
     Hardened against:
       - empty/whitespace gate or report_dir
       - path traversal (--report-dir resolved + sanity-checked for state/manifest.json)
-      - racing --approve invocations (fcntl.flock around read+write)
+      - racing --approve invocations (portalocker around read+write)
       - re-approval of an already-resolved gate (status checked under the lock)
       - partial reads (atomic publish via os.replace)
     """
-    import fcntl
+    import portalocker
     from json import loads, dumps, JSONDecodeError
 
     if not args.report_dir or not args.gate or not args.gate.strip():
@@ -1178,14 +1178,14 @@ def _handle_approve_subcommand(args) -> int:
     #
     # The lock lives on a sidecar `.lock` file rather than on the data file
     # itself, because we replace the data file via `os.replace` inside the
-    # critical section. A flock on the data file's fd points to the inode the
+    # critical section. A lock on the data file's fd points to the inode the
     # fd was opened with — after `os.replace` swaps the inode, a second process
-    # could `flock` the stale inode in parallel and never see "responded".
+    # could lock the stale inode in parallel and never see "responded".
     # The sidecar's inode never changes, so the lock semantics survive.
     lock_file = report_dir / "state" / "pending_approval.lock"
     try:
         with open(lock_file, "a+") as lockf:
-            fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+            portalocker.lock(lockf.fileno(), portalocker.LOCK_EX)
             try:
                 # Re-check existence under the lock (a concurrent run might
                 # have just resolved and removed the file).
@@ -1229,8 +1229,8 @@ def _handle_approve_subcommand(args) -> int:
                 tmp.write_text(dumps(request, indent=2))
                 os.replace(tmp, approval_file)
             finally:
-                fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
-    except OSError as e:
+                portalocker.unlock(lockf.fileno())
+    except (OSError, portalocker.LockException) as e:
         print(f"error: could not write approval response: {e}", file=sys.stderr)
         return 1
 
