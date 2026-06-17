@@ -97,7 +97,7 @@ def run_plan(state: State) -> bool:
     state.mark_phase_complete(2)
 
     ui.info(f"{len(state.threads)} research threads planned")
-    ui.info(f"Estimated cost: ${state.estimated_cost:.2f} (based on {len(state.threads)} agents, model: {state.research_model}, includes 20% buffer)")
+    ui.info(f"Estimated cost: ≈ ${state.estimated_cost:.2f} API equivalent ({len(state.threads)} agents, model: {state.research_model}, +20% buffer) — Claude Code subscribers pay only their flat fee")
     return True
 
 
@@ -290,7 +290,7 @@ def _write_plan_file(state: State, plan: dict, plan_file: Path):
         f"**Expertise Level:** {state.expertise_level}",
         f"**Research Model:** {state.research_model}",
         f"**Agent Count:** {len(threads)}",
-        f"**Estimated Cost:** ${state.estimated_cost:.2f}",
+        f"**Estimated Cost (≈ API equivalent):** ${state.estimated_cost:.2f}",
         "",
         "## Coverage Notes",
         coverage,
@@ -384,5 +384,5 @@ def replan_with_feedback(state: State, feedback: str) -> bool:
         ui.error(f"Failed to write plan file: {e}")
         return False
 
-    ui.info(f"Revised: {len(state.threads)} threads, estimated cost: ${state.estimated_cost:.2f}")
+    ui.info(f"Revised: {len(state.threads)} threads, estimated cost: ≈ ${state.estimated_cost:.2f} API equivalent")
     return True

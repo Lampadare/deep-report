@@ -165,8 +165,8 @@ def run_research(
                     avg_cost = 0.50
                 if followup_count > 0:
                     estimated_additional = avg_cost * followup_count
-                    decision["estimated_additional_cost"] = f"~${estimated_additional:.2f} ({followup_count} threads)"
-                    ui.info(f"Estimated additional cost: ~${estimated_additional:.2f} for {followup_count} follow-up threads (running total: ${state.total_cost:.2f}, excludes third-party API costs)")
+                    decision["estimated_additional_cost"] = f"~${estimated_additional:.2f} ({followup_count} threads, ≈ API equivalent)"
+                    ui.info(f"Estimated additional cost: ≈ ${estimated_additional:.2f} API equivalent for {followup_count} follow-up threads (running total: ≈ ${state.total_cost:.2f} API, excludes third-party MCP costs)")
 
                 decision["_sufficient"] = sufficient
                 if not approval.iteration_gate(state, decision, iteration):
