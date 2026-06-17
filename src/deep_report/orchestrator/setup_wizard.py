@@ -48,6 +48,23 @@ from .ui import ui
 CONFIG_PATH = Path.home() / ".deep-report" / "mcp_config.json"
 KEYS_ENV_PATH = Path.home() / ".deep-report" / "keys.env"
 
+# Module-level flag so the Windows chmod warning only fires once per process.
+_WINDOWS_CHMOD_WARNED = False
+
+
+def _warn_windows_chmod_once(path: Path) -> None:
+    """Warn (once per session) that 0o600 is not enforced on Windows."""
+    global _WINDOWS_CHMOD_WARNED
+    if sys.platform != 'win32' or _WINDOWS_CHMOD_WARNED:
+        return
+    _WINDOWS_CHMOD_WARNED = True
+    ui.warning(
+        f"On Windows, the 0o600 file mode is not enforced. "
+        f"{path} is readable by any process running as your user. "
+        f"Treat it accordingly."
+    )
+
+
 # Names we never import even if a user has them in CC — these are either already
 # in the catalog (catalog wins) or actively retired by deep-report.
 _IMPORT_BLOCKLIST = {"paper-search"}  # replaced by cyanheads/pubmed-mcp-server
@@ -136,11 +153,11 @@ def discover_cc_servers() -> dict[str, dict]:
     claude_json = Path.home() / ".claude.json"
     if claude_json.exists():
         try:
-            data = json.loads(claude_json.read_text())
+            data = json.loads(claude_json.read_text(encoding='utf-8', errors='replace'))
         except json.JSONDecodeError:
             ui.warning(f"~/.claude.json is not valid JSON — skipping CC import discovery")
             data = {}
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             data = {}
         if not isinstance(data, dict):
             data = {}
@@ -172,11 +189,11 @@ def discover_cc_servers() -> dict[str, dict]:
         local_mcp = None
     if local_mcp is not None and local_mcp.exists():
         try:
-            data = json.loads(local_mcp.read_text())
+            data = json.loads(local_mcp.read_text(encoding='utf-8', errors='replace'))
         except json.JSONDecodeError:
             ui.warning(f"{local_mcp} is not valid JSON — skipping local MCP import discovery")
             data = {}
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             data = {}
         if not isinstance(data, dict):
             data = {}
@@ -195,11 +212,11 @@ def load_config() -> Optional[dict]:
     if not CONFIG_PATH.exists():
         return None
     try:
-        data = json.loads(CONFIG_PATH.read_text())
+        data = json.loads(CONFIG_PATH.read_text(encoding='utf-8', errors='replace'))
     except json.JSONDecodeError:
         ui.warning(f"MCP config at {CONFIG_PATH} is not valid JSON — re-run `deep-report --setup`")
         return None
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     if not isinstance(data, dict):
         ui.warning(f"MCP config at {CONFIG_PATH} is not a JSON object — re-run `deep-report --setup`")
@@ -264,6 +281,7 @@ def save_config(enabled: list[str], imported: Optional[dict[str, dict]] = None) 
         CONFIG_PATH.chmod(0o600)  # belt-and-suspenders for non-POSIX FS
     except OSError:
         pass
+    _warn_windows_chmod_once(CONFIG_PATH)
     return CONFIG_PATH
 
 
@@ -352,8 +370,8 @@ def load_keys_env() -> None:
     if not KEYS_ENV_PATH.exists():
         return
     try:
-        text = KEYS_ENV_PATH.read_text()
-    except OSError as exc:
+        text = KEYS_ENV_PATH.read_text(encoding='utf-8', errors='replace')
+    except (OSError, UnicodeDecodeError) as exc:
         ui.warning(f"Cannot read {KEYS_ENV_PATH}: {exc}")
         return
     for key, value in _parse_keys_env_text(text).items():
@@ -386,8 +404,8 @@ def persist_keys_to_env_file(keys: dict[str, str]) -> Path:
     merged: dict[str, str] = {}
     if KEYS_ENV_PATH.exists():
         try:
-            merged.update(_parse_keys_env_text(KEYS_ENV_PATH.read_text()))
-        except OSError as exc:
+            merged.update(_parse_keys_env_text(KEYS_ENV_PATH.read_text(encoding='utf-8', errors='replace')))
+        except (OSError, UnicodeDecodeError) as exc:
             ui.warning(f"Cannot read existing {KEYS_ENV_PATH}: {exc} — overwriting.")
             merged = {}
 
@@ -430,6 +448,7 @@ def persist_keys_to_env_file(keys: dict[str, str]) -> Path:
         KEYS_ENV_PATH.chmod(0o600)
     except OSError:
         pass
+    _warn_windows_chmod_once(KEYS_ENV_PATH)
     return KEYS_ENV_PATH
 
 

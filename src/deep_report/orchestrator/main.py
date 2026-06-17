@@ -107,8 +107,8 @@ OPTION_DESCRIPTIONS = {
         "expert": "Technical depth, latest research, assumes domain expertise",
     },
     "model": {
-        "sonnet": "Fast and cost-effective (~$2-5 per report)",
-        "opus": "Deeper analysis, higher quality (~$8-15 per report)",
+        "sonnet": "Fast and cost-effective (~$2-5 API equivalent per report)",
+        "opus": "Deeper analysis, higher quality (~$8-15 API equivalent per report)",
     },
 }
 
@@ -582,7 +582,7 @@ def run_configure_interview(topic: str, cwd: str = None, existing_refs: str = No
         rec_agents = max(3, min(recs["agent_count"], 30))
         agent_default = rec_agents
     agent_count = _prompt_int(
-        "How many research agents? (~$0.50-2.00/agent for opus, ~$0.15-0.50 for sonnet)",
+        "How many research agents? (≈ API: $0.50-2.00/agent for opus, $0.15-0.50 for sonnet)",
         default=agent_default, min_val=3, max_val=30
     )
 
@@ -1490,6 +1490,21 @@ def setup_skill() -> int:
         ui.info(f"  {skill_target} → {skill_source}")
         ui.info("Use /deep-report in Claude Code to invoke")
         return 0
+    except (OSError, NotImplementedError):
+        # Windows without Developer Mode / Admin can't symlink.
+        # Fall back to copytree so the skill still installs (caveat: future
+        # deep-report upgrades require re-running --setup-skill to refresh).
+        try:
+            import shutil
+            shutil.copytree(skill_source, skill_target)
+            ui.success("Claude Code skill installed (as copy)")
+            ui.info(f"  {skill_target} ← {skill_source}")
+            ui.info("Re-run --setup-skill after upgrades to refresh the copy.")
+            ui.info("Use /deep-report in Claude Code to invoke")
+            return 0
+        except Exception as e:
+            ui.error(f"Failed to install skill: {e}")
+            return 1
     except Exception as e:
         ui.error(f"Failed to create symlink: {e}")
         return 1
@@ -1716,7 +1731,7 @@ def resume_report(report_dir: Path, ctx: OrchestratorContext) -> int:
     ui.step(f"Resuming report: {ui._truncate(state.topic, 60)}")
     ui.info(f"  Completed: {len(completed)} agents, Failed: {len(failed)}")
     ui.info(f"  Iterations: {iteration}/{max_iter}")
-    ui.info(f"  Estimated cost so far: ${est_cost:.2f}")
+    ui.info(f"  Estimated cost so far: ≈ ${est_cost:.2f} API equivalent")
     ui.info(f"  Resuming from Phase {target_phase}: {step_display}")
 
     # Check if report is already complete

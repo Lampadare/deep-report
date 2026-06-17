@@ -36,9 +36,9 @@ class ReportRegistry:
         Caller must hold LOCK_EX on the lock file.
         """
         try:
-            with open(REGISTRY_FILE, 'r') as f:
+            with open(REGISTRY_FILE, 'r', encoding='utf-8', errors='replace') as f:
                 return json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
+        except (json.JSONDecodeError, FileNotFoundError, UnicodeDecodeError):
             return {"reports": []}
 
     def _write_unlocked(self, data: dict):
@@ -52,7 +52,7 @@ class ReportRegistry:
             suffix=".tmp"
         )
         try:
-            with os.fdopen(fd, 'w') as f:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
                 f.flush()
                 os.fsync(f.fileno())

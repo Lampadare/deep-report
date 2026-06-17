@@ -60,7 +60,7 @@ class InterventionHandler:
         }
         try:
             self.intervention_file.parent.mkdir(parents=True, exist_ok=True)
-            self.intervention_file.write_text(json.dumps(request, indent=2))
+            self.intervention_file.write_text(json.dumps(request, indent=2), encoding='utf-8')
         except Exception as e:
             ui.warning(f"Intervention state saving failed: {e}")
 
@@ -141,14 +141,14 @@ class InterventionHandler:
         if response == 'q':
             request["status"] = "quit"
             request["responded_at"] = datetime.now().isoformat()
-            self.intervention_file.write_text(json.dumps(request, indent=2))
+            self.intervention_file.write_text(json.dumps(request, indent=2), encoding='utf-8')
             raise KeyboardInterrupt("User quit at intervention")
 
         # Explicit fallthrough: skip takes precedence over retry
         if response == 's':
             request["status"] = "skipped"
             request["responded_at"] = datetime.now().isoformat()
-            self.intervention_file.write_text(json.dumps(request, indent=2))
+            self.intervention_file.write_text(json.dumps(request, indent=2), encoding='utf-8')
             return False
 
         # User wants to retry (Enter)

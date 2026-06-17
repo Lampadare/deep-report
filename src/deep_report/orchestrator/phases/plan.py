@@ -34,7 +34,7 @@ def run_plan(state: State) -> bool:
     scope_file = report_dir / "state" / "scope.md"
     scope_content = ""
     if scope_file.exists():
-        scope_content = scope_file.read_text()
+        scope_content = scope_file.read_text(encoding='utf-8', errors='replace')
 
     # Read seed summaries for context
     seed_context = _gather_seed_summaries(report_dir)
@@ -97,7 +97,7 @@ def run_plan(state: State) -> bool:
     state.mark_phase_complete(2)
 
     ui.info(f"{len(state.threads)} research threads planned")
-    ui.info(f"Estimated cost: ${state.estimated_cost:.2f} (based on {len(state.threads)} agents, model: {state.research_model}, includes 20% buffer)")
+    ui.info(f"Estimated cost: ≈ ${state.estimated_cost:.2f} API equivalent ({len(state.threads)} agents, model: {state.research_model}, +20% buffer) — Claude Code subscribers pay only their flat fee")
     return True
 
 
@@ -110,7 +110,7 @@ def _gather_seed_summaries(report_dir: Path) -> str:
     context = []
     for f in summaries_dir.glob("*.md"):
         try:
-            content = f.read_text()[:1500]
+            content = f.read_text(encoding='utf-8', errors='replace')[:1500]
             context.append(f"### {f.stem}\n{content}")
         except (OSError, IOError) as e:
             ui.warning(f"Failed to read seed file {f.name}: {e}")
@@ -290,7 +290,7 @@ def _write_plan_file(state: State, plan: dict, plan_file: Path):
         f"**Expertise Level:** {state.expertise_level}",
         f"**Research Model:** {state.research_model}",
         f"**Agent Count:** {len(threads)}",
-        f"**Estimated Cost:** ${state.estimated_cost:.2f}",
+        f"**Estimated Cost (≈ API equivalent):** ${state.estimated_cost:.2f}",
         "",
         "## Coverage Notes",
         coverage,
@@ -313,7 +313,7 @@ def _write_plan_file(state: State, plan: dict, plan_file: Path):
         lines.append("")
 
     try:
-        plan_file.write_text("\n".join(lines))
+        plan_file.write_text("\n".join(lines), encoding='utf-8')
     except (OSError, PermissionError) as e:
         raise OSError(f"Failed to write plan file: {e}") from e
 
@@ -327,7 +327,7 @@ def replan_with_feedback(state: State, feedback: str) -> bool:
     report_dir = Path(state.report_dir)
 
     scope_file = report_dir / "state" / "scope.md"
-    scope_content = scope_file.read_text() if scope_file.exists() else ""
+    scope_content = scope_file.read_text(encoding='utf-8', errors='replace') if scope_file.exists() else ""
     seed_context = _gather_seed_summaries(report_dir)
 
     ui.step("Re-generating research plan with feedback")
@@ -384,5 +384,5 @@ def replan_with_feedback(state: State, feedback: str) -> bool:
         ui.error(f"Failed to write plan file: {e}")
         return False
 
-    ui.info(f"Revised: {len(state.threads)} threads, estimated cost: ${state.estimated_cost:.2f}")
+    ui.info(f"Revised: {len(state.threads)} threads, estimated cost: ≈ ${state.estimated_cost:.2f} API equivalent")
     return True

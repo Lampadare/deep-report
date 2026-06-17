@@ -430,6 +430,12 @@ class DeepReportUI:
             return
         if self._session_start_time is None:
             self._session_start_time = time.time()
+        # One-time disclaimer so the footer's "≈ $X.XX API" reads correctly
+        # to Claude Code subscribers, who pay a flat fee and don't get billed
+        # per-run on top of it.
+        if not getattr(self, "_cost_disclaimer_shown", False):
+            self.dim("Cost shown is the equivalent API cost — Claude Code subscribers pay only their flat subscription.")
+            self._cost_disclaimer_shown = True
         self._footer_live = Live(
             _SpinnerTable(self._build_session_display),
             console=self.console,
@@ -475,7 +481,7 @@ class DeepReportUI:
         return Group(*renderables)
 
     def _build_footer(self):
-        """Build footer with phase bar, elapsed, cost, verbose."""
+        """Build footer with phase bar, elapsed, equivalent API cost, verbose."""
         parts = [Rule(style=theme.dim)]
         parts.append(self._render_phase_bar_text())
 
@@ -487,7 +493,7 @@ class DeepReportUI:
         if self._session_cost > 0:
             if len(stats) > 0:
                 stats.append("  ", theme.dim)
-            stats.append(f"${self._session_cost:.2f}", theme.dim)
+            stats.append(f"≈ ${self._session_cost:.2f} API", theme.dim)
         if self._verbose:
             stats.append("  verbose ON", f"bold {theme.accent}")
         else:

@@ -9,7 +9,8 @@ from pathlib import Path
 
 def check_claude_cli():
     """Verify Claude CLI is available."""
-    if not shutil.which("claude"):
+    # On Windows, npm installs the CLI as claude.cmd; check both shims.
+    if not any(shutil.which(n) for n in ("claude", "claude.cmd", "claude.exe")):
         from .orchestrator.ui import ui
         ui.error("Claude CLI not found.")
         ui.info("deep-report requires Claude Code to be installed.")
@@ -20,9 +21,10 @@ def check_claude_cli():
 
 def check_claude_auth():
     """Probe Claude CLI authentication. Warns on failure, never blocks."""
+    from .orchestrator.utils.agents import _resolve_claude_binary
     try:
         result = subprocess.run(
-            ["claude", "--print", "--model", "haiku", "say ok"],
+            [_resolve_claude_binary(), "--print", "--model", "haiku", "say ok"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
@@ -83,9 +85,17 @@ def install_skill():
 
     try:
         skill_dst.symlink_to(skill_src)
-    except (OSError, PermissionError) as e:
-        ui.error(f"Could not create skill link: {e}")
-        return
+    except (OSError, NotImplementedError):
+        # Windows without Developer Mode / Admin can't symlink.
+        # Fall back to copytree so the skill still installs (caveat: future
+        # deep-report upgrades require re-running --setup-skill to refresh).
+        try:
+            import shutil
+            shutil.copytree(skill_src, skill_dst)
+            ui.info("Installed skill as copy (re-run --setup-skill after upgrades)")
+        except Exception as e:
+            ui.error(f"Could not install skill: {e}")
+            return
 
     ui.success(f"Skill installed: {skill_dst} -> {skill_src}")
     ui.info("You can now use /deep-report in Claude Code")

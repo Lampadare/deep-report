@@ -96,7 +96,7 @@ class ProgressWriter:
     def _write_legacy(self, line: str):
         """Write to legacy log format for backwards compatibility."""
         try:
-            with open(self.legacy_file, "a") as f:
+            with open(self.legacy_file, "a", encoding='utf-8') as f:
                 portalocker.lock(f.fileno(), portalocker.LOCK_EX)
                 try:
                     f.write(f"[{self._elapsed()}] {line}\n")

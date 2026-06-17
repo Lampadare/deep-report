@@ -7,6 +7,8 @@ import sys
 import threading
 from typing import Callable, Optional
 
+_IS_WINDOWS = sys.platform == 'win32'
+
 
 class KeyboardListener:
     """Non-blocking keyboard listener for real-time key detection.
@@ -45,6 +47,15 @@ class KeyboardListener:
         except ImportError:
             pass
 
+        if _IS_WINDOWS:
+            try:
+                import msvcrt  # noqa: F401
+                if sys.stdin.isatty():
+                    self._available = True
+                    self._use_stdin = True  # used by _listen as a flag, behavior diverges below
+            except ImportError:
+                pass
+
     @property
     def available(self) -> bool:
         """Check if keyboard listening is available."""
@@ -73,6 +84,31 @@ class KeyboardListener:
         self._thread = None
 
     def _listen(self):
+        if _IS_WINDOWS:
+            self._listen_windows()
+        else:
+            self._listen_posix()
+
+    def _listen_windows(self):
+        """Windows key reader using msvcrt — no termios, no select."""
+        import msvcrt
+        import time
+        while self._running:
+            if msvcrt.kbhit():
+                try:
+                    ch = msvcrt.getwch()  # wide-char getch
+                except Exception:
+                    self._running = False
+                    return
+                try:
+                    self.on_key(ch)
+                except Exception:
+                    pass
+            else:
+                # No key — short sleep so we don't burn CPU
+                time.sleep(0.05)
+
+    def _listen_posix(self):
         """Main listening loop - runs in background thread."""
         import tty
         import termios

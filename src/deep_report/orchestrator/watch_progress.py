@@ -177,7 +177,7 @@ def watch_jsonl(report_dir: Path, follow: bool = True, raw: bool = False):
 
     # Read existing content
     try:
-        with open(watch_file) as f:
+        with open(watch_file, encoding='utf-8', errors='replace') as f:
             for line in f:
                 line = line.rstrip()
                 if not line:
@@ -215,7 +215,7 @@ def watch_jsonl(report_dir: Path, follow: bool = True, raw: bool = False):
                 except OSError:
                     pass
 
-                with open(watch_file) as f:
+                with open(watch_file, encoding='utf-8', errors='replace') as f:
                     f.seek(last_pos)
                     for line in f:
                         line = line.rstrip()
