@@ -165,8 +165,8 @@ def run_research(
                     avg_cost = 0.50
                 if followup_count > 0:
                     estimated_additional = avg_cost * followup_count
-                    decision["estimated_additional_cost"] = f"~${estimated_additional:.2f} ({followup_count} threads)"
-                    ui.info(f"Estimated additional cost: ~${estimated_additional:.2f} for {followup_count} follow-up threads (running total: ${state.total_cost:.2f}, excludes third-party API costs)")
+                    decision["estimated_additional_cost"] = f"~${estimated_additional:.2f} ({followup_count} threads, ≈ API equivalent)"
+                    ui.info(f"Estimated additional cost: ≈ ${estimated_additional:.2f} API equivalent for {followup_count} follow-up threads (running total: ≈ ${state.total_cost:.2f} API, excludes third-party MCP costs)")
 
                 decision["_sufficient"] = sufficient
                 if not approval.iteration_gate(state, decision, iteration):
@@ -219,7 +219,7 @@ def run_research(
 def _read_file(path: Path) -> str:
     """Read file content or return empty string."""
     if path.exists():
-        return path.read_text()
+        return path.read_text(encoding='utf-8', errors='replace')
     return ""
 
 
@@ -232,7 +232,7 @@ def _gather_seed_context(report_dir: Path) -> str:
     context = []
     for f in sorted(summaries_dir.glob("*.md")):
         try:
-            content = f.read_text().strip()
+            content = f.read_text(encoding='utf-8', errors='replace').strip()
             context.append(f"[{f.stem}]: {content}")
         except (OSError, IOError) as e:
             ui.warning(f"Failed to read seed context {f.name}: {e}")
@@ -643,7 +643,7 @@ def _summarize_outputs(state: State):
             continue
 
         try:
-            content = output_file.read_text()
+            content = output_file.read_text(encoding='utf-8', errors='replace')
         except Exception as e:
             ui.warning(f"Failed to read {output_file}: {e}")
             continue
@@ -713,7 +713,7 @@ def _gather_all_summaries(report_dir: Path) -> list[str]:
     summaries = []
     for f in sorted(summaries_dir.glob("*_summary.md")):
         try:
-            content = f.read_text()
+            content = f.read_text(encoding='utf-8', errors='replace')
             summaries.append(f"### {f.stem}\n{content}")
         except (OSError, IOError) as e:
             ui.warning(f"Failed to read summary {f.name}: {e}")

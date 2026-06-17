@@ -56,7 +56,7 @@ def _calculate_metrics(state: State, report_dir: Path) -> dict:
     if report_file.exists():
         try:
             word_count = 0
-            with open(report_file) as f:
+            with open(report_file, encoding='utf-8', errors='replace') as f:
                 for line in f:
                     word_count += len(line.split())
             metrics["report_word_count"] = word_count
@@ -100,7 +100,7 @@ def _calculate_metrics(state: State, report_dir: Path) -> dict:
     if refs_file.exists():
         try:
             ref_count = 0
-            with open(refs_file) as f:
+            with open(refs_file, encoding='utf-8', errors='replace') as f:
                 for line in f:
                     if line.startswith("- "):
                         ref_count += 1
@@ -116,7 +116,7 @@ def _calculate_metrics(state: State, report_dir: Path) -> dict:
     metrics["audio_generated"] = audio_file.exists()
     if audio_file.exists():
         try:
-            metrics["audio_word_count"] = len(audio_file.read_text().split())
+            metrics["audio_word_count"] = len(audio_file.read_text(encoding='utf-8', errors='replace').split())
         except (OSError, IOError) as e:
             ui.warning(f"Audio metrics reading failed: {e}")
             metrics["audio_word_count"] = 0
@@ -149,7 +149,7 @@ def _write_summary(state: State, metrics: dict, summary_file: Path):
         f"| Papers Downloaded | {metrics['papers_downloaded']} |",
         f"| References | {metrics['reference_count']} |",
         f"| Audio Version | {'Yes' if metrics['audio_generated'] else 'No'} |",
-        f"| Estimated Cost | ${metrics['estimated_cost']:.2f} |",
+        f"| Estimated Cost (≈ API equivalent) | ${metrics['estimated_cost']:.2f} |",
         "",
         "## Files",
         "",
@@ -187,7 +187,7 @@ def _write_summary(state: State, metrics: dict, summary_file: Path):
             lines.append(f"- [{status}] **{fu.get('id')}** ({fu.get('reason')}): {fu.get('focus')}")
 
     try:
-        summary_file.write_text("\n".join(lines))
+        summary_file.write_text("\n".join(lines), encoding='utf-8')
     except (OSError, PermissionError) as e:
         ui.warning(f"Summary writing failed: {e}")
 
@@ -199,7 +199,7 @@ def _finalize_manifest(state: State, metrics: dict):
 
     try:
         if manifest_file.exists():
-            manifest = json.loads(manifest_file.read_text())
+            manifest = json.loads(manifest_file.read_text(encoding='utf-8', errors='replace'))
         else:
             manifest = {}
     except (OSError, IOError, json.JSONDecodeError) as e:
@@ -223,7 +223,7 @@ def _finalize_manifest(state: State, metrics: dict):
     })
 
     try:
-        manifest_file.write_text(json.dumps(manifest, indent=2))
+        manifest_file.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
     except (OSError, PermissionError) as e:
         ui.warning(f"Manifest writing failed: {e}")
 
@@ -248,9 +248,9 @@ def _print_summary(state: State, metrics: dict, report_dir: Path):
     # Build cost display: show both estimated and actual if actual is available
     total_cost = state.total_cost
     if total_cost > 0:
-        cost_str = f"Estimated: ${metrics['estimated_cost']:.2f} | Actual: ~${total_cost:.2f}"
+        cost_str = f"Estimated: ${metrics['estimated_cost']:.2f} | Actual: ~${total_cost:.2f} (≈ API equivalent)"
     else:
-        cost_str = f"${metrics['estimated_cost']:.2f}"
+        cost_str = f"≈ ${metrics['estimated_cost']:.2f} API equivalent"
 
     stats = {
         "Report": f"{metrics['report_word_count']:,} words",

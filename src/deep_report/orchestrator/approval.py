@@ -316,7 +316,7 @@ class ApprovalGate:
         metadata = {
             "threads_to_run": len(threads),
             "model": research_model,
-            "estimated_cost": f"${estimated_cost:.2f}",
+            "estimated_cost": f"≈ ${estimated_cost:.2f} API equivalent",
             "max_iterations": max_iterations,
         }
         return self.request_approval("pre_research", metadata,

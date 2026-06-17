@@ -214,7 +214,7 @@ class State:
                     suffix=".tmp"
                 )
                 try:
-                    with os.fdopen(fd, 'w') as f:
+                    with os.fdopen(fd, 'w', encoding='utf-8') as f:
                         portalocker.lock(f.fileno(), portalocker.LOCK_EX)
                         try:
                             f.write(json.dumps(data, indent=2, default=json_default))
@@ -243,7 +243,7 @@ class State:
 
         if state_file.exists():
             try:
-                with open(state_file, 'r') as f:
+                with open(state_file, 'r', encoding='utf-8', errors='replace') as f:
                     portalocker.lock(f.fileno(), portalocker.LOCK_SH)
                     try:
                         data = json.load(f)

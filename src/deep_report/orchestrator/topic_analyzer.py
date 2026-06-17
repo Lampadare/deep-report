@@ -226,7 +226,7 @@ class UserProfile:
         """Load profile from disk."""
         try:
             if PROFILE_FILE.exists():
-                return json.loads(PROFILE_FILE.read_text())
+                return json.loads(PROFILE_FILE.read_text(encoding='utf-8', errors='replace'))
         except (json.JSONDecodeError, OSError):
             pass
         return {"history": []}
@@ -235,7 +235,7 @@ class UserProfile:
         """Persist profile to disk."""
         try:
             PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-            PROFILE_FILE.write_text(json.dumps(self._data, indent=2))
+            PROFILE_FILE.write_text(json.dumps(self._data, indent=2), encoding='utf-8')
         except OSError:
             pass
 
