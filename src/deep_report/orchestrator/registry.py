@@ -56,7 +56,7 @@ class ReportRegistry:
                 json.dump(data, f, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
-            os.rename(tmp_path, REGISTRY_FILE)
+            os.replace(tmp_path, REGISTRY_FILE)
         except Exception:
             try:
                 os.unlink(tmp_path)
