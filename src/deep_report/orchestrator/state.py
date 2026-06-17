@@ -222,7 +222,7 @@ class State:
                             os.fsync(f.fileno())
                         finally:
                             portalocker.unlock(f.fileno())
-                    os.rename(tmp_path, self._state_file)
+                    os.replace(tmp_path, self._state_file)
                 except Exception:
                     # Clean up temp file on error
                     try:
