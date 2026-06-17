@@ -1490,6 +1490,21 @@ def setup_skill() -> int:
         ui.info(f"  {skill_target} → {skill_source}")
         ui.info("Use /deep-report in Claude Code to invoke")
         return 0
+    except (OSError, NotImplementedError):
+        # Windows without Developer Mode / Admin can't symlink.
+        # Fall back to copytree so the skill still installs (caveat: future
+        # deep-report upgrades require re-running --setup-skill to refresh).
+        try:
+            import shutil
+            shutil.copytree(skill_source, skill_target)
+            ui.success("Claude Code skill installed (as copy)")
+            ui.info(f"  {skill_target} ← {skill_source}")
+            ui.info("Re-run --setup-skill after upgrades to refresh the copy.")
+            ui.info("Use /deep-report in Claude Code to invoke")
+            return 0
+        except Exception as e:
+            ui.error(f"Failed to install skill: {e}")
+            return 1
     except Exception as e:
         ui.error(f"Failed to create symlink: {e}")
         return 1
